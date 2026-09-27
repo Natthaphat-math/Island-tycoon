@@ -52,21 +52,76 @@
   function refundOf(state, type) {
     return { cur: B[type].cost[0], amount: priceAt(type, Math.max(0, countOf(state, type) - 1)).mul(REFUND).floor() };
   }
+
+  // ---- upgrades (per building, paid in silver; each level costs x3 the last)
+  const UP_GROWTH = 3;
+  function upgradeCost(b) {
+    const def = B[b.type], lvl = G.levelOf(b);
+    if (!def.up || lvl >= def.max) return null;
+    return { cur: 'silver', amount: D(def.up).mul(Decimal.pow(UP_GROWTH, lvl - 1)).ceil() };
+  }
+  function upgradeSpent(b) {
+    let total = D(0);
+    for (let l = 1; l < G.levelOf(b); l++) total = total.add(D(B[b.type].up).mul(Decimal.pow(UP_GROWTH, l - 1)).ceil());
+    return total;
+  }
+  function upgrade(state, b) {
+    const cost = upgradeCost(b);
+    if (!cost || state.wallet[cost.cur].lt(cost.amount)) return null;
+    state.wallet[cost.cur] = state.wallet[cost.cur].sub(cost.amount);
+    b.level = G.levelOf(b) + 1;
+    return cost;
+  }
+
+  // What selling b gives back: half the price of the last copy + half the silver
+  // spent on its upgrades. Works for a building that is currently picked up too.
+  function refundFor(state, b) {
+    const idx = Math.max(0, countOf(state, b.type) - (state.buildings.includes(b) ? 1 : 0));
+    const parts = [{ cur: B[b.type].cost[0], amount: priceAt(b.type, idx).mul(REFUND).floor() }];
+    const up = upgradeSpent(b).mul(REFUND).floor();
+    if (up.gt(0)) parts.push({ cur: 'silver', amount: up });
+    return parts;
+  }
   function sell(state, id) {
     const b = state.buildings.find((x) => x.id === id);
     if (!b) return null;
-    const ref = refundOf(state, b.type);
+    const parts = refundFor(state, b);
     G.remove(state, id);
-    state.wallet[ref.cur] = state.wallet[ref.cur].add(ref.amount);
-    return ref;
+    for (const p of parts) state.wallet[p.cur] = state.wallet[p.cur].add(p.amount);
+    return parts;
+  }
+
+  // ---- land: buy one tile next to the island at a time (sea -> sand -> grass)
+  const LAND_BASE = 40, LAND_GROWTH = 1.35;
+  function landCost(state) { return { cur: 'bronze', amount: D(LAND_BASE).mul(Decimal.pow(LAND_GROWTH, state.landBought || 0)).ceil() }; }
+  // What buying tile (c, r) would do, or null: sand touching grass -> grass; sea touching land -> sand.
+  // The outermost ring of the map stays sea.
+  function landOption(state, c, r) {
+    if (r < 1 || c < 1 || r >= state.rows - 1 || c >= state.cols - 1) return null;
+    const t = G.terrainAt(state, c, r);
+    const n4 = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => G.terrainAt(state, c + dx, r + dy));
+    if (t === 's' && n4.includes('g')) return { from: 's', to: 'g' };
+    if (t === '.' && n4.some((x) => x !== '.')) return { from: '.', to: 's' };
+    return null;
+  }
+  function buyLand(state, c, r) {
+    const opt = landOption(state, c, r), cost = landCost(state);
+    if (!opt || state.wallet.bronze.lt(cost.amount)) return null;
+    state.wallet.bronze = state.wallet.bronze.sub(cost.amount);
+    const row = state.terrain[r];
+    state.terrain[r] = row.slice(0, c) + opt.to + row.slice(c + 1);
+    state.landBought = (state.landBought || 0) + 1;
+    return { ...opt, cost };
   }
 
   const comboMult = (n) => Math.min(COMBO_MAX, 1 + COMBO_STEP * Math.max(0, n - 1));
   const isReady = (b) => (b.fill || 0) >= 1;
   // One full cycle's worth of this building's current output.
+  // the fish book gives a permanent bonus to all income (see core/fishing.js)
+  const fishing = () => root.Fishing || (typeof require === 'function' ? require('./fishing.js') : null);
   function batch(state, b, ev) {
-    const def = B[b.type];
-    return D(ev.get(b.id).output).mul(def.cycle);
+    const def = B[b.type], F = fishing();
+    return D(ev.get(b.id).output).mul(def.cycle).mul(F ? F.bookBonus(state) : 1);
   }
 
   // Advance time. Buildings fill up and then simply wait, full, until tapped:
@@ -100,10 +155,15 @@
   function deserialize(json, map) {
     const data = JSON.parse(json);
     if (!data || data.v !== SAVE_VERSION || !data.state) throw new Error('unknown save format');
-    const s = G.createState(map), src = data.state;
+    const src = data.state;
+    // bought land: same size as the base map and only sea/sand/grass
+    const t = src.terrain;
+    const okTerrain = Array.isArray(t) && t.length === map.length && t.every((row, i) => typeof row === 'string' && row.length === map[i].length && /^[.sg]*$/.test(row));
+    const s = G.createState(okTerrain ? t : map);
+    if (okTerrain && Number.isInteger(src.landBought) && src.landBought > 0) s.landBought = Math.min(9999, src.landBought);
     for (const b of src.buildings || []) {
       if (!B[b.type] || !Number.isInteger(b.c) || !Number.isInteger(b.r)) continue;
-      const nb = G.place(s, b.type, b.c, b.r, (b.rot | 0) % 4, Number.isInteger(b.id) && b.id > 0 ? b.id : undefined);
+      const nb = G.place(s, b.type, b.c, b.r, (b.rot | 0) % 4, Number.isInteger(b.id) && b.id > 0 ? b.id : undefined, Math.max(1, Math.min(B[b.type].max, b.level | 0)));
       if (nb) {
         nb.fill = Math.min(1, Math.max(0, +b.fill || 0));
         const burn = Math.floor(+b.burn || 0);
@@ -141,7 +201,8 @@
 
   const api = {
     Decimal, CURRENCIES, START, PRICE_GROWTH, REFUND, COMBO_WINDOW, COMBO_MAX, RIPE_WINDOW, RIPE_BONUS, isRipe,
-    newWallet, newGame, costOf, canAfford, buy, refundOf, sell, comboMult, isReady, batch, tick, collect,
+    newWallet, newGame, costOf, canAfford, buy, refundOf, refundFor, sell, comboMult, isReady, batch, tick, collect,
+    upgradeCost, upgradeSpent, upgrade, landCost, landOption, buyLand,
     serialize, deserialize, fmt,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

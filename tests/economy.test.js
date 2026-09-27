@@ -28,7 +28,7 @@ test('selling refunds half of what the last copy cost', () => {
   const s = game(1000);
   const b = E.buy(s, 'farm', 0, 0, 0);
   const ref = E.sell(s, b.id);
-  assert.equal(ref.amount.toNumber(), 20);
+  assert.deepEqual(ref.map((p) => [p.cur, p.amount.toNumber()]), [['bronze', 20]]);
   assert.equal(s.wallet.bronze.toNumber(), 1000 - 40 + 20);
   assert.equal(s.buildings.length, 0);
 });
@@ -140,4 +140,69 @@ test('tapping right as a building fills is PERFECT: x1.5', () => {
   const q = E.collect(s, h.id, 1);
   assert.equal(q.perfect, false);
   assert.equal(q.amount.toNumber(), 3);
+});
+
+test('upgrades: silver price x3 per level, x2 output per level, capped', () => {
+  const s = game(1000);
+  s.wallet.silver = new E.Decimal(1000);
+  const h = E.buy(s, 'hut', 0, 0, 0);
+  assert.equal(E.upgradeCost(h).amount.toNumber(), 2);
+  E.upgrade(s, h); E.upgrade(s, h);
+  assert.equal(h.level, 3);
+  assert.equal(s.wallet.silver.toNumber(), 1000 - 2 - 6);
+  assert.equal(G.evaluate(s).get(h.id).output, 4);          // 1/s x 2 x 2
+  E.upgrade(s, h); E.upgrade(s, h);
+  assert.equal(h.level, 5);
+  assert.equal(E.upgradeCost(h), null);
+  assert.equal(E.upgrade(s, h), null);
+  const poor = E.buy(s, 'farm', 3, 3, 0);
+  s.wallet.silver = new E.Decimal(1);
+  assert.equal(E.upgrade(s, poor), null);
+  assert.equal(poor.level, undefined);
+});
+
+test('upgraded market boosts harder and upgraded towers guard wider', () => {
+  const s = game(10000);
+  s.wallet.silver = new E.Decimal(10000);
+  const m = E.buy(s, 'market', 0, 0, 0);
+  const h = E.buy(s, 'hut', 2, 0, 0);
+  E.upgrade(s, m);
+  assert.equal(G.evaluate(s).get(h.id).mult, 1.75);
+  const t = E.buy(s, 'tower', 5, 5, 0);
+  const r1 = G.auraCells(s, t).size;
+  E.upgrade(s, t); E.upgrade(s, t);
+  assert.ok(G.auraCells(s, t).size > r1);
+});
+
+test('selling refunds half of the upgrade silver too, even while picked up', () => {
+  const s = game(1000);
+  s.wallet.silver = new E.Decimal(100);
+  const h = E.buy(s, 'hut', 0, 0, 0);
+  E.upgrade(s, h); E.upgrade(s, h);                           // 2 + 6 silver spent
+  const held = { ...h };
+  G.remove(s, h.id);
+  assert.deepEqual(E.refundFor(s, held).map((p) => [p.cur, p.amount.toNumber()]), [['bronze', 5], ['silver', 4]]);
+});
+
+test('land: sand next to grass becomes grass, sea next to land becomes sand, prices climb', () => {
+  const MAP = ['......', '.....', '.sgs..', '.sgs..', '......', '......'].map((r) => r.padEnd(6, '.'));
+  const s = E.newGame(MAP, []);
+  s.wallet.bronze = new E.Decimal(1000);
+  assert.deepEqual(E.landOption(s, 1, 2), { from: 's', to: 'g' });
+  assert.deepEqual(E.landOption(s, 2, 1), { from: '.', to: 's' });
+  assert.equal(E.landOption(s, 4, 4), null);                  // not touching land
+  assert.equal(E.landOption(s, 0, 2), null);                  // outer ring stays sea
+  const c0 = E.landCost(s).amount.toNumber();
+  E.buyLand(s, 1, 2);
+  assert.equal(G.terrainAt(s, 1, 2), 'g');
+  assert.equal(s.wallet.bronze.toNumber(), 1000 - c0);
+  assert.ok(E.landCost(s).amount.toNumber() > c0);
+  assert.ok(G.canPlace(s, 'hut', 1, 2, 0).ok);
+  // survives a save round trip
+  const back = E.deserialize(E.serialize(s), MAP).state;
+  assert.equal(G.terrainAt(back, 1, 2), 'g');
+  assert.equal(back.landBought, 1);
+  // a tampered terrain is ignored
+  const bad = JSON.parse(E.serialize(s)); bad.state.terrain[0] = 'gggggg!';
+  assert.equal(G.terrainAt(E.deserialize(JSON.stringify(bad), MAP).state, 1, 2), 's');
 });

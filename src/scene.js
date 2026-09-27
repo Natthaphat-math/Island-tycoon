@@ -1,33 +1,48 @@
 // scene.js — renders the core state (src/core/*) in the Sunlit 3/4 style and turns
 // mouse, keyboard and touch input into core calls. Rules, money, the day/night
-// loop and villager orders live in Core / Economy / Night / Orders; this file
-// only draws and routes input.
+// loop, orders, the merchant and fishing live in Core / Economy / Night / Orders /
+// Merchant / Fishing; this file only draws and routes input.
 //
-// Two modes:
-//   PLAY  taps collect (PERFECT if right as it fills), fire at raiders at night,
-//         or put out fires. Tapping a building that isn't ready shows its info.
-//   EDIT  (drawer button or E) taps pick buildings up to move / rotate / sell.
+// Two cameras: the world camera pans (drag) and zooms smoothly (pinch / wheel),
+// then settles on a whole-number zoom so pixels stay crisp; the UI camera draws
+// every scrollFactor-0 object at 2x in a fixed 320x180 layout on top.
+//
+// Modes:
+//   PLAY  taps collect (PERFECT if right as it fills), reel in fish, fire at
+//         raiders at night, or put out fires. Hold a building to start editing.
+//   EDIT  (menu rail, E, holding a building, or right-click one) drag buildings
+//         to move them; the selected one can be rotated, upgraded or sold from
+//         the dock. Tap empty space to finish.
 // All info and actions live in one docked panel in the bottom corner opposite
-// the drawer, so nothing pops up on top of the buildings you're looking at.
+// the menu, so nothing pops up on top of the buildings you're looking at.
 (function () {
   'use strict';
   const { PixelText } = PX;
-  const B = Core.BUILDINGS, E = Economy, N = Night, O = Orders;
+  const B = Core.BUILDINGS, E = Economy, N = Night, O = Orders, M = Merchant, F = Fishing;
+  const ITEMS = ['bucket', 'net', 'cannon'];
   const ORDER = ['hut', 'farm', 'longhouse', 'workshop', 'plantation', 'market', 'tower', 'idol'];
   const CATS = [
     { id: 'income', icon: 'ico-bronze', name: 'INCOME', types: ['hut', 'farm', 'longhouse', 'workshop', 'plantation'] },
     { id: 'boost', icon: 'cat-boost', name: 'BOOST', types: ['market'] },
     { id: 'defense', icon: 'cat-defense', name: 'DEFENSE', types: ['tower'] },
     { id: 'trap', icon: 'cat-trap', name: 'TRAPS', types: ['idol'] },
+    { id: 'land', icon: 'cat-land', name: 'LAND', types: [] },
   ];
   const SAVE_KEY = 'itc-save-v1';
-  const TOP = 14, DW = 26;                     // top bar height, drawer width
+  const TOP = 14, RAIL = 20, DW = 26;          // top bar height, menu rail width, build drawer width
+  const UW = 320, UH = 180;                    // UI layout size (drawn at 2x)
+  const ZMIN = 1, ZMAX = 3, ZSTART = 2;        // world zoom range
+  const HOLD_MS = 450, DRAG_PX = 10;           // long-press time; movement (game px) that starts a drag
   const LETTER = { bronze: 'B', silver: 'S', gold: 'G', diamond: 'D' };
+  const RARITY = { COMMON: '#c0cbdc', UNCOMMON: '#63c74d', RARE: '#2ce8f5', LEGENDARY: '#feae34' };
   const fmtMult = (m) => 'x' + (Math.round(m * 100) / 100);
   const fmtRate = (n) => (n < 10 ? String(Math.round(n * 100) / 100) : E.fmt(n));
   const clock = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
   const bag = (o) => Object.entries(o || {}).map(([c, v]) => E.fmt(v) + LETTER[c]).join(' ');
   const hex = (c) => Phaser.Display.Color.HexStringToColor(c).color;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const isUI = (o) => o.scrollFactorX === 0;
+  const U = (o) => o.setScrollFactor(0);       // UI objects are exactly the scrollFactor-0 ones
 
   class GameScene extends Phaser.Scene {
     constructor() { super('game'); }
@@ -45,19 +60,24 @@
       this.state = loaded ? loaded.state : E.newGame(S.map, S.buildings);
       N.restore(this.state, loaded && loaded.raw.cycle);
       O.restore(this.state, loaded && loaded.raw.orders);
+      M.restore(this.state, loaded && loaded.raw.items, loaded && loaded.raw.merchant);
+      M.ensure(this.state);
+      F.restore(this.state, loaded && loaded.raw);
 
       this.views = new Map(); this.raiders = new Map();
-      this.auraObjs = []; this.ants = null; this.focus = null;
-      this.ghost = null; this.edit = false; this.combo = 0; this.comboLeft = 0;
+      this.auraObjs = []; this.ants = null; this.focus = null; this.press = null; this.pinch = null;
+      this.ghost = null; this.edit = false; this.combo = 0; this.comboLeft = 0; this.modal = null;
       this.touch = window.matchMedia && matchMedia('(pointer: coarse)').matches;
       this.side = this.registry.get('drawerSide') === 'right' ? 'right' : 'left';
-      this.drawerOpen = true; this.cat = 'income';
-      this.cameras.main.setBackgroundColor('#124e89');
+      this.drawerOpen = false; this.cat = 'income';
 
-      S.terrain(this);
-      this.gridObj = S.gridOverlay(this).setDepth(1).setVisible(this.registry.get('grid') !== false);
+      this.setupCameras();
+      this.music = window.Soundtrack ? Soundtrack.get() : null;
       this.antsG = this.add.graphics().setDepth(4);
-      for (const d of S.decor) this.addDecor(d);
+      this.landG = this.add.graphics().setDepth(4);
+      this.rippleG = this.add.graphics().setDepth(6);
+      this.decorImgs = S.decor.map((d) => ({ d, img: this.addDecor(d) }));
+      this.buildTerrain();
 
       this.buildNight();
       this.refreshEval();
@@ -65,22 +85,42 @@
       this.buildUI();
       const ph = this.state.cycle.phase;
       this.setNight(ph === 'dusk' || ph === 'night', true);
-      if (ph === 'dusk' || ph === 'night') { this.spawnRaiders(); this.setDrawer(false); }
+      if (ph === 'dusk' || ph === 'night') this.spawnRaiders();
       if (ph === 'day' && !this.state.orders.active) O.next(this.state);
 
+      this.input.addPointer(1);                     // second finger for pinch zoom
       this.input.mouse && this.input.mouse.disableContextMenu();
       this.input.on('pointermove', (p) => this.onPointerMove(p));
       this.input.on('pointerdown', (p, over) => this.onPointerDown(p, over));
-      this.input.on('wheel', (p, over, dx, dy) => { if (this.ghost && dy) this.rotate(); });
+      this.input.on('pointerup', (p) => this.onPointerUp(p));
+      this.input.on('pointerupoutside', (p) => this.onPointerUp(p));
+      this.input.on('wheel', (p, over, dx, dy) => {
+        if (!dy || this.modal) return;
+        if (this.ghost) this.rotate(); else this.zoomBy(dy < 0 ? 1 : -1, p.x, p.y);
+      });
       const kb = this.input.keyboard;
-      kb.on('keydown-N', () => this.skipPhase());
-      kb.on('keydown-G', () => window.IslandGame.toggleGrid());
-      kb.on('keydown-E', () => this.setEdit(!this.edit));
-      kb.on('keydown-ESC', () => { if (this.ghost) this.cancel(); else if (this.edit) this.setEdit(false); else this.clearFocus(); });
-      kb.on('keydown-R', () => this.rotate());
-      kb.on('keydown-X', () => { if (this.ghost && this.ghost.moving) this.sellHeld(); });
-      kb.on('keydown-TAB', (e) => { e.preventDefault && e.preventDefault(); this.setDrawer(!this.drawerOpen); });
-      ['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT'].forEach((k, i) => kb.on('keydown-' + k, () => this.selectCard(ORDER[i])));
+      const k = (name, fn) => kb.on('keydown-' + name, (e) => { if (!this.modal) fn(e); });
+      k('N', () => this.skipPhase());
+      k('G', () => window.IslandGame.toggleGrid());
+      k('E', () => this.setEdit(!this.edit));
+      k('B', () => this.openBook());
+      kb.on('keydown-ESC', () => {
+        if (this.modal) this.closeModal();
+        else if (this.ghost) this.cancel();
+        else if (this.edit) this.setEdit(false);
+        else if (this.drawerOpen) this.setDrawer(false);
+        else this.clearFocus();
+      });
+      k('R', () => { if (this.ghost) this.rotate(); else if (this.edit && this.focus) this.rotateSel(this.focus); });
+      k('X', () => { if (this.edit && this.focus && !this.ghost) this.sellSel(this.focus); });
+      k('TAB', (e) => { e.preventDefault && e.preventDefault(); this.setDrawer(!this.drawerOpen); });
+      kb.on('keydown', (e) => {
+        if (this.music) this.music.unlock();
+        if (this.modal) return;
+        if (e.key === '+' || e.key === '=') this.zoomBy(1);
+        else if (e.key === '-' || e.key === '_') this.zoomBy(-1);
+      });
+      ['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT'].forEach((key, i) => k(key, () => this.selectCard(ORDER[i])));
       this.time.addEvent({ delay: 250, loop: true, callback: () => this.refreshCards() });
     }
 
@@ -96,10 +136,83 @@
       try { localStorage.setItem(SAVE_KEY, E.serialize(this.state)); return true; } catch (e) { return false; }
     }
 
+    // ------------------------------------------------------------ cameras
+    setupCameras() {
+      const cam = this.cameras.main, wb = this.S.world;
+      cam.setBackgroundColor('#124e89');
+      cam.setBounds(wb.x0, wb.y0, wb.w, wb.h);
+      cam.setZoom(ZSTART);
+      cam.centerOn(160, 90);
+      this.uiCam = this.cameras.add(0, 0, this.scale.width, this.scale.height).setOrigin(0, 0).setZoom(this.scale.width / UW);
+      // each object is drawn by exactly one camera: UI (scrollFactor 0) or world
+      const split = () => {
+        const wm = cam.id, um = this.uiCam.id;
+        for (const o of this.children.list) o.cameraFilter = isUI(o) ? wm : um;
+      };
+      this.events.on('prerender', split);
+      this.events.once('shutdown', () => this.events.off('prerender', split));
+    }
+    // pointer (game pixels) -> UI layout / world coordinates
+    uiPt(p) { return { x: p.x * UW / this.scale.width, y: p.y * UH / this.scale.height }; }
+    worldPt(sx, sy) {
+      const cam = this.cameras.main, z = cam.zoom, hw = cam.width / 2, hh = cam.height / 2;
+      return { x: cam.scrollX + hw - hw / z + sx / z, y: cam.scrollY + hh - hh / z + sy / z };
+    }
+    // world -> UI layout coordinates (for the dock and the edge markers)
+    toUI(wx, wy) {
+      const cam = this.cameras.main, z = cam.zoom, hw = cam.width / 2, hh = cam.height / 2;
+      const sx = (wx - (cam.scrollX + hw - hw / z)) * z, sy = (wy - (cam.scrollY + hh - hh / z)) * z;
+      return { x: sx * UW / this.scale.width, y: sy * UH / this.scale.height };
+    }
+    // zoom to z, keeping world point (wx, wy) under screen point (sx, sy)
+    setView(z, sx, sy, wx, wy) {
+      const cam = this.cameras.main, hw = cam.width / 2, hh = cam.height / 2;
+      cam.setZoom(z);
+      cam.setScroll(wx - hw + hw / z - sx / z, wy - hh + hh / z - sy / z);
+    }
+    zoomTo(z, sx, sy) {
+      const cam = this.cameras.main;
+      if (sx == null) { sx = cam.width / 2; sy = cam.height / 2; }
+      const w = this.worldPt(sx, sy);
+      z = clamp(z, ZMIN, ZMAX);
+      if (this.zoomTween) this.zoomTween.stop();
+      const o = { z: cam.zoom };
+      this.zoomTarget = z;
+      this.zoomTween = this.tweens.add({ targets: o, z, duration: 220, ease: 'Sine.easeOut', onUpdate: () => this.setView(o.z, sx, sy, w.x, w.y), onComplete: () => { this.zoomTween = null; } });
+    }
+    zoomBy(step, sx, sy) {
+      const base = this.zoomTween ? this.zoomTarget : this.cameras.main.zoom;
+      this.zoomTo(Math.round(base) + step, sx, sy);
+    }
+    resetView() {
+      if (this.zoomTween) this.zoomTween.stop();
+      this.cameras.main.setZoom(ZSTART).centerOn(160, 90);
+    }
+    startPinch() {
+      const a = this.input.pointer1, b = this.input.pointer2;
+      if (this.press && this.press.hold) this.press.hold.remove();
+      this.press = null;
+      if (this.ghost && this.ghost.drag) this.finishDrag(true);
+      if (this.zoomTween) { this.zoomTween.stop(); this.zoomTween = null; }
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      this.pinch = { d0: Math.max(10, Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y)), z0: this.cameras.main.zoom, w: this.worldPt(mx, my) };
+    }
+    updatePinch() {
+      const a = this.input.pointer1, b = this.input.pointer2, pc = this.pinch;
+      const d = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
+      const z = clamp(pc.z0 * d / pc.d0, ZMIN * 0.9, ZMAX * 1.1);
+      this.setView(z, (a.x + b.x) / 2, (a.y + b.y) / 2, pc.w.x, pc.w.y);
+    }
+    endPinch() {
+      this.pinch = null;
+      this.zoomTo(Math.round(clamp(this.cameras.main.zoom, ZMIN, ZMAX)));   // settle on a crisp whole-number zoom
+    }
+
     // ------------------------------------------------------------ extra UI art
     uiTextures() {
       const P = this.S.P, k = this.key, C = P.card, tex = PX.tex;
-      tex(this, k('drawer'), DW, 180 - TOP, (p) => ART.drawPanel(p, 0, 0, DW, 180 - TOP, P.panel));
+      tex(this, k('drawer'), DW, UH - TOP, (p) => ART.drawPanel(p, 0, 0, DW, UH - TOP, P.panel));
+      tex(this, k('rail'), RAIL, UH - TOP, (p) => ART.drawPanel(p, 0, 0, RAIL, UH - TOP, P.panel));
       const box = (name, w, h, sel) => tex(this, k(name), w, h, (p) => {
         p.rect(1, 1, w - 2, h - 2, C.fill);
         const b = sel ? C.sel : C.border;
@@ -108,9 +221,8 @@
       });
       for (const sel of [false, true]) {
         const s = sel ? '-sel' : '';
-        box('tab' + s, 12, 12, sel); box('card22' + s, 24, 22, sel); box('editbtn' + s, 24, 11, sel);
+        box('tab' + s, 12, 12, sel); box('card22' + s, 24, 22, sel); box('railbtn' + s, 18, 18, sel);
       }
-      box('handle', 24, 10, false); box('pull', 10, 28, false);
       const ico = (name, rows, map) => tex(this, k(name), rows[0].length + 2, rows.length + 2, (p) => p.sprite(1, 1, rows, map), { outline: P.iconOutline });
       ico('cat-boost', ['..#..', '.###.', '#####', '..#..', '..#..', '..#..'], { '#': P.up });
       ico('cat-defense', ['#######', '#.....#', '#.###.#', '#.....#', '.#...#.', '..#.#..', '...#...'], { '#': '#2ce8f5', '.': '#0099db' });
@@ -118,7 +230,7 @@
       ico('ico-ok', ['......#', '.....##', '#...##.', '##.##..', '.###...', '..#....'], { '#': P.up });
       ico('ico-no', ['#...#', '##.##', '.###.', '##.##', '#...#'], { '#': P.down });
       ico('ico-rot', ['.###.', '#...#', '#....', '#..#.', '.###.', '...#.'], { '#': P.text });
-      // corner brackets that frame a coin bubble when that building can fire
+      // corner brackets that frame a coin bubble when that building can fire (or reel)
       tex(this, k('crosshair'), 17, 18, (p) => {
         const c = '#ff0044';
         for (const [x, y, dx, dy] of [[0, 0, 1, 1], [16, 0, -1, 1], [0, 17, 1, -1], [16, 17, -1, -1]]) {
@@ -147,21 +259,42 @@
       const [bw, bh] = Core.bbox(Core.rotateShape(B[type].shape, rot));
       return { c: c - Math.floor((bw - 1) / 2), r: r - Math.floor((bh - 1) / 2) };
     }
-    drawerX() { return this.side === 'left' ? 0 : 320 - DW; }
-    overDrawer(p) {
-      if (!this.drawerOpen) return this.side === 'left' ? p.x < 10 && p.y > 76 && p.y < 104 : p.x >= 310 && p.y > 76 && p.y < 104;
-      return this.side === 'left' ? p.x < DW : p.x >= 320 - DW;
-    }
+    railX() { return this.side === 'left' ? 0 : UW - RAIL; }
+    drawerX() { return this.side === 'left' ? RAIL : UW - RAIL - DW; }
+    menuW() { return RAIL + (this.drawerOpen ? DW : 0); }
+    overMenu(u) { return this.side === 'left' ? u.x < this.menuW() : u.x >= UW - this.menuW(); }
     // only a dock with buttons swallows taps; plain info never blocks the map
-    overDock(p) { const t = this.dock; return t && t.visible && t.hasBtns && p.x >= t.x && p.x < t.x + t.w && p.y >= t.y && p.y < t.y + t.h; }
-    inMap(p) { return p.y >= TOP && !this.overDrawer(p) && !this.overDock(p); }
-    scrollX() { return this.cameras.main.scrollX; }
+    overDock(u) { const t = this.dock; return t && t.visible && t.hasBtns && u.x >= t.x && u.x < t.x + t.w && u.y >= t.y && u.y < t.y + t.h; }
+    inMap(u) { return u.y >= TOP && !this.overMenu(u) && !this.overDock(u); }
+
+    // terrain + grid textures follow the island's current tiles (land can be bought)
+    buildTerrain() {
+      const map = this.state.terrain;
+      let h = 0;
+      for (const ch of map.join('|')) h = (h * 31 + ch.charCodeAt(0)) | 0;
+      const id = (h >>> 0).toString(36), tk = 'sunlit-terrain-' + id, gk = 'sunlit-grid-' + id;
+      const oldT = this.terrainKey, oldG = this.gridKey;
+      const vis = this.gridObj ? this.gridObj.visible : this.registry.get('grid') !== false;
+      if (this.terrainSprite) this.terrainSprite.destroy();
+      if (this.gridObj) this.gridObj.destroy();
+      this.terrainSprite = this.S.terrain(this, map, tk);
+      this.gridObj = this.S.gridOverlay(this, map, gk).setDepth(1).setVisible(vis);
+      this.terrainKey = tk; this.gridKey = gk;
+      for (const k of [oldT, oldG]) {
+        if (!k || k === tk || k === gk) continue;
+        if (this.anims.exists(k)) this.anims.remove(k);
+        if (this.textures.exists(k)) this.textures.remove(k);
+      }
+      // palms, rocks and the dock vanish once their tile has been turned into something else
+      for (const { d, img } of this.decorImgs) img.setVisible(Core.terrainAt(this.state, d.c, d.r) === this.S.map[d.r][d.c]);
+    }
 
     addDecor(d) {
       const a = { x: this.ox + (d.c + 0.5) * this.T, y: this.oy + (d.r + 1) * this.T };
       const img = this.add.image(a.x + (d.dx || 0), a.y + (d.dy || 0), d.tex).setOrigin(0.5, 1);
       img.setDepth(d.flat ? 5 : 10 + img.y + img.x * 0.001);
       if (d.sway) this.tweens.add({ targets: img, x: img.x + 1, duration: 1400 + Math.random() * 600, yoyo: true, repeat: -1, ease: 'Stepped', easeParams: [1], delay: Math.random() * 1000 });
+      return img;
     }
 
     // ------------------------------------------------------------ building views
@@ -169,10 +302,13 @@
       const art = this.S.art[b.type], a = this.anchor(b.type, b.c, b.r, b.rot), def = B[b.type];
       const tex = this.texFor(b.type, b.rot);
       const sprite = this.add.image(a.x, a.y + (art.dy || 0), tex).setOrigin(0.5, 1).setDepth(10 + a.y + a.x * 0.001);
-      const v = { b, sprite, tex, x: a.x, y: a.y, lights: [] };
+      const v = { b, sprite, tex, x: a.x, y: a.y, lights: [], pips: [] };
+      for (let i = 1; i < Core.levelOf(b); i++) {
+        v.pips.push(this.add.image(a.x - Math.floor(sprite.width / 2) + 3 + (i - 1) * 4, a.y - 2, this.key('level')).setDepth(sprite.depth + 0.2));
+      }
       sprite.setInteractive({ pixelPerfect: true, alphaTolerance: 1, cursor: 'pointer' });
-      sprite.on('pointerover', (p) => { if (!p.wasTouch && !this.ghost) this.setFocus(v, false); });
-      sprite.on('pointerout', (p) => { if (!p.wasTouch && this.focus === v && !this.focusSticky) this.clearFocus(); });
+      sprite.on('pointerover', (p) => { if (!p.wasTouch && !this.ghost && !this.edit) this.setFocus(v, false); });
+      sprite.on('pointerout', (p) => { if (!p.wasTouch && this.focus === v && !this.focusSticky && !this.edit) this.clearFocus(); });
 
       if (def.cur) {
         const by = sprite.y - sprite.height - 1;
@@ -207,8 +343,19 @@
       const v = this.views.get(id);
       if (!v) return;
       if (this.focus === v) this.clearFocus();
-      for (const o of [v.sprite, v.bubble, v.aim, v.flame, v.flameLight, ...v.lights]) if (o) { this.tweens.killTweensOf(o); o.destroy(); }
+      for (const o of [v.sprite, v.bubble, v.aim, v.flame, v.flameLight, ...v.lights, ...v.pips]) if (o) { this.tweens.killTweensOf(o); o.destroy(); }
       this.views.delete(id);
+    }
+    // redraw one building (level pips, rotation, tower coverage) and keep it selected
+    redrawView(id) {
+      const v = this.views.get(id), sel = this.focus === v;
+      if (!v) return null;
+      this.removeView(id);
+      this.refreshEval();
+      if (B[v.b.type].kind === 'defense') this.rebuildDefenseLights(); else this.addView(v.b);
+      const nv = this.views.get(id);
+      if (sel && nv) this.setFocus(nv, true);
+      return nv;
     }
 
     syncFlame(v) {
@@ -280,13 +427,15 @@
       return out;
     }
 
-    // ------------------------------------------------------------ focus (info only)
-    // focus = hovered (mouse) or tapped-but-not-ready (touch) building: highlight,
-    // aura and its numbers in the dock. Sticky focus (from a tap) fades after a while.
+    // ------------------------------------------------------------ focus / selection
+    // PLAY: focus = hovered (mouse) or tapped-but-not-ready (touch) building: highlight,
+    // aura and its numbers in the dock; sticky focus (from a tap) fades after a while.
+    // EDIT: focus is the selected building, with rotate / upgrade / sell in the dock.
     setFocus(v, sticky) {
-      if (this.ghost) return;
+      if (this.ghost || !v) return;
       if (this.focus && this.focus !== v) this.clearFocus();
       this.focus = v; this.focusSticky = !!sticky;
+      if (this.sellArmed !== v.b.id) this.sellArmed = null;
       if (!(v.b.burn > 0)) {
         if (this.textures.exists(v.tex + '-hl')) v.sprite.setTexture(v.tex + '-hl');
         else v.sprite.setTint(0xfff4c0);
@@ -294,38 +443,78 @@
       this.showAura(v.b, this.effectsFrom(v.b.id));
       this.dockForBuilding(v);
       if (this.focusTimer) this.focusTimer.remove();
-      if (sticky) this.focusTimer = this.time.delayedCall(4000, () => { if (this.focus === v) this.clearFocus(); });
+      if (sticky && !this.edit) this.focusTimer = this.time.delayedCall(4000, () => { if (this.focus === v && !this.edit) this.clearFocus(); });
     }
     clearFocus() {
       const v = this.focus;
-      this.focus = null; this.focusSticky = false;
+      this.focus = null; this.focusSticky = false; this.sellArmed = null;
       if (v && v.sprite.active) { v.sprite.setTexture(v.tex); if (!(v.b.burn > 0)) v.sprite.clearTint(); }
       this.clearAura();
       if (!this.ghost) this.dockIdle();
     }
 
     dockForBuilding(v) {
-      const b = v.b, d = B[b.type], e = this.eval.get(b.id);
+      const b = v.b, d = B[b.type], e = this.eval.get(b.id), name = d.name + (Core.levelOf(b) > 1 ? ' LV' + Core.levelOf(b) : '');
       let l3 = d.cur ? fmtMult(e.mult) + ' = ' + fmtRate(e.output) + '/S' : d.kind === 'defense' ? 'GUARDS AT NIGHT' : 'NO INCOME ITSELF';
       let icon = d.cur || null;
       if (b.burn > 0) { l3 = 'FIRE! TAP x' + b.burn; icon = null; }
       else if (d.cur && N.isCovered(this.state, b, this.cov)) l3 += ' GUARDED';
-      if (this.edit) { l3 = this.touch ? 'TAP TO MOVE / SELL' : 'CLICK TO MOVE / SELL'; icon = null; }
-      this.showDock({ lines: [d.name, d.desc, l3], icon, near: v });
+      if (!this.edit) { this.showDock({ lines: [name, d.desc, l3], icon, near: v }); return; }
+      const btns = [];
+      if (Core.rotations(b.type).length > 1) btns.push({ icon: 'ico-rot', fn: () => this.rotateSel(this.focus) });
+      const up = E.upgradeCost(b);
+      if (up) btns.push({ label: 'UP ' + E.fmt(up.amount) + 'S', fn: () => this.upSel(this.focus), tone: this.state.wallet.silver.gte(up.amount) ? 'ok' : 'off' });
+      const ref = E.refundFor(this.state, b);
+      btns.push({ label: this.sellArmed === b.id ? '+' + ref.map((p) => E.fmt(p.amount) + LETTER[p.cur]).join(' ') + '?' : 'SELL', fn: () => this.sellSel(this.focus), tone: 'danger' });
+      btns.push({ icon: 'ico-ok', fn: () => this.clearFocus(), tone: 'ok' });
+      this.showDock({ lines: [name, l3, (this.touch ? 'DRAG' : 'DRAG / RIGHT-CLICK') + ' TO MOVE'], btns, near: v });
+    }
+
+    // selected building (edit mode): rotate in place, upgrade, sell
+    rotateSel(v) {
+      if (!v) return;
+      const b = v.b, rots = Core.rotations(b.type);
+      if (rots.length < 2) return;
+      for (let i = 1; i < rots.length; i++) {
+        const rot = rots[(rots.indexOf(b.rot) + i) % rots.length];
+        for (const [dc, dr] of [[0, 0], [-1, 0], [0, -1], [-1, -1], [1, 0], [0, 1]]) {
+          if (!Core.canPlace(this.state, b.type, b.c + dc, b.r + dr, rot, b.id).ok) continue;
+          b.rot = rot; b.c += dc; b.r += dr;
+          const nv = this.redrawView(b.id);
+          if (nv) this.dust(nv);
+          this.save();
+          return;
+        }
+      }
+      this.floatText(v.x, v.sprite.y - v.sprite.height, 'NO ROOM TO TURN', '#e43b44');
+    }
+    upSel(v) {
+      if (!v) return;
+      const paid = E.upgrade(this.state, v.b);
+      if (!paid) { this.floatText(v.x, v.sprite.y - v.sprite.height, 'NEED SILVER', '#e43b44'); return; }
+      const nv = this.redrawView(v.b.id) || v;
+      this.floatText(nv.x, nv.sprite.y - nv.sprite.height, 'LEVEL ' + v.b.level + '!', '#fee761');
+      this.burst(nv.x, nv.sprite.y - nv.sprite.height + 6, ['#fee761', '#ffffff']);
+      this.save();
+    }
+    sellSel(v) {
+      if (!v) return;
+      if (this.sellArmed !== v.b.id) { this.sellArmed = v.b.id; this.dockForBuilding(v); return; }
+      this.sellArmed = null;
+      this.sell(v);
     }
 
     // ------------------------------------------------------------ the dock
     buildDock() {
       const P = this.S.P;
       const t = this.dock = { visible: false, x: 0, y: 0, w: 0, h: 0 };
-      t.g = this.add.graphics().setScrollFactor(0).setDepth(3500);
-      t.lines = [0, 1, 2].map((i) => new PixelText(this, 0, 0, '', { color: [P.accent, P.text, P.dim][i], outline: P.textOutline }).setOrigin(0).setScrollFactor(0).setDepth(3501));
-      t.icon = this.add.image(0, 0, this.key('ico-bronze')).setOrigin(0).setScrollFactor(0).setDepth(3501);
-      t.btns = [0, 1, 2, 3].map(() => {
-        const zone = this.add.zone(0, 0, 10, 10).setOrigin(0).setScrollFactor(0).setDepth(3502);
-        zone.isUI = true;
-        const label = new PixelText(this, 0, 0, '', { color: P.text, outline: P.textOutline }).setOrigin(0).setScrollFactor(0).setDepth(3503);
-        const icon = this.add.image(0, 0, this.key('ico-ok')).setScrollFactor(0).setDepth(3503);
+      t.g = U(this.add.graphics().setDepth(3500));
+      t.lines = [0, 1, 2, 3].map((i) => U(new PixelText(this, 0, 0, '', { color: [P.accent, P.text, P.dim, P.text][i], outline: P.textOutline }).setOrigin(0).setDepth(3501)));
+      t.icon = U(this.add.image(0, 0, this.key('ico-bronze')).setOrigin(0).setDepth(3501));
+      t.btns = [0, 1, 2, 3, 4].map(() => {
+        const zone = U(this.add.zone(0, 0, 10, 10).setOrigin(0).setDepth(3502));
+        const label = U(new PixelText(this, 0, 0, '', { color: P.text, outline: P.textOutline }).setOrigin(0).setDepth(3503));
+        const icon = U(this.add.image(0, 0, this.key('ico-ok')).setDepth(3503));
         const bt = { zone, label, icon, fn: null };
         zone.on('pointerdown', () => { if (bt.fn) bt.fn(); });
         return bt;
@@ -333,25 +522,26 @@
       this.hideDock();
     }
 
-    // o: { lines, icon, btns: [{ label | icon, fn, tone: 'ok'|'danger'|null }], near: view (dock hops away from it) }
+    // o: { lines, icon, btns: [{ label | icon, fn, tone: 'ok'|'danger'|'off'|null }], near: {x,y} in world (dock hops away from it) }
     showDock(o) {
       const t = this.dock, P = this.S.P;
-      const lines = o.lines.filter((x) => x != null);
+      if (!t) return;
+      const lines = o.lines.filter((x) => x != null).slice(0, t.lines.length);
       t.lines.forEach((pt, i) => pt.setText(lines[i] || '').setVisible(i < lines.length));
       const iconW = o.icon ? 10 : 0;
-      const btns = o.btns || [];
+      const btns = (o.btns || []).slice(0, t.btns.length);
       const bw = btns.map((b, i) => (b.icon ? 16 : t.btns[i].label.setText(b.label).width + 8));
       let w = Math.max(40, ...t.lines.map((pt, i) => (i < lines.length ? pt.width + (i === lines.length - 1 ? iconW : 0) : 0))) + 6;
       w = Math.max(w, bw.reduce((a, x) => a + x + 2, 0) + 4);
       const h = lines.length * 8 + 4 + (btns.length ? 15 : 0);
-      // bottom corner opposite the drawer; hop to the other corner if it would cover `near`
-      const leftX = (this.drawerOpen && this.side === 'left' ? DW : 0) + 2;
-      const rightX = (this.drawerOpen && this.side === 'right' ? 320 - DW : 320) - 2 - w;
-      let x = this.side === 'left' ? rightX : leftX;
-      const y = 178 - h;
+      // bottom corner opposite the menu; hop to the other corner if it would cover `near`
+      const left = this.side === 'left', mw = this.menuW();
+      const leftX = (left ? mw : 0) + 2, rightX = (left ? UW : UW - mw) - 2 - w;
+      let x = left ? rightX : leftX;
+      const y = UH - 2 - h;
       if (o.near) {
-        const nx = o.near.x - this.scrollX(), ny = o.near.y;
-        if (nx > x - 8 && nx < x + w + 8 && ny > y - 4) x = x === rightX ? leftX : rightX;
+        const n = this.toUI(o.near.x, o.near.y);
+        if (n.x > x - 8 && n.x < x + w + 8 && n.y > y - 4) x = x === rightX ? leftX : rightX;
       }
       Object.assign(t, { visible: true, x, y, w, h, hasBtns: btns.length > 0 });
       t.g.clear().setVisible(true);
@@ -367,14 +557,17 @@
         if (!on) { bt.fn = null; bt.zone.disableInteractive(); return; }
         bt.fn = b.fn; bt.zone.setInteractive({ cursor: 'pointer' });
         const by = y + h - 14;
-        const fill = b.tone === 'danger' ? 0xa22633 : b.tone === 'ok' ? 0x3e8948 : b.tone === 'off' ? 0x3a4466 : 0x733e39;
-        t.g.fillStyle(fill, 1).fillRect(bx, by, bw[i], 12);
-        t.g.fillStyle(hex(P.panel.light), 0.6).fillRect(bx, by, bw[i], 1);
+        this.drawBtn(t.g, bx, by, bw[i], b.tone);
         if (b.icon) bt.icon.setTexture(this.key(b.icon)).setPosition(bx + 8, by + 6).setAlpha(b.tone === 'off' ? 0.4 : 1);
         else bt.label.setPosition(bx + 4, by + 3);
         bt.zone.setPosition(bx - 1, by - 3).setSize(bw[i] + 2, 16);
         bx += bw[i] + 2;
       });
+    }
+    drawBtn(g, x, y, w, tone) {
+      const fill = tone === 'danger' ? 0xa22633 : tone === 'ok' ? 0x3e8948 : tone === 'off' ? 0x3a4466 : 0x733e39;
+      g.fillStyle(fill, 1).fillRect(x, y, w, 12);
+      g.fillStyle(hex(this.S.P.panel.light), 0.6).fillRect(x, y, w, 1);
     }
     hideDock() {
       const t = this.dock;
@@ -385,8 +578,12 @@
     }
     // what the dock shows when nothing is selected
     dockIdle() {
+      if (this.shopOpen) return this.dockShop(true);
       if (this.edit) {
-        this.showDock({ lines: ['EDIT MODE', this.touch ? 'TAP A BUILDING TO' : 'CLICK A BUILDING TO', 'MOVE, TURN OR SELL'], btns: [{ label: 'DONE', fn: () => this.setEdit(false), tone: 'ok' }] });
+        this.showDock({ lines: ['EDIT MODE', 'DRAG A BUILDING TO MOVE IT', (this.touch ? 'TAP' : 'CLICK') + ' EMPTY SPACE TO FINISH'], btns: [{ label: 'DONE', fn: () => this.setEdit(false), tone: 'ok' }] });
+      } else if (this.landMode()) {
+        const cost = E.landCost(this.state);
+        this.showDock({ lines: ['BUY LAND', 'TAP A DOTTED TILE NEXT TO THE ISLAND', 'NEXT TILE ' + E.fmt(cost.amount)], icon: 'bronze' });
       } else this.hideDock();
     }
 
@@ -394,11 +591,55 @@
     setEdit(on) {
       if (this.ghost) this.cancel();
       this.clearFocus();
+      if (on && this.drawerOpen) this.setDrawer(false);
       this.edit = on;
       this.gridObj.setVisible(on || this.registry.get('grid') !== false);
-      if (this.drawer) this.drawer.editBtn.setTexture(this.key(on ? 'editbtn-sel' : 'editbtn'));
+      this.refreshRail();
       if (on) this.banner('EDIT MODE', '#fee761');
+      this.landSel = null;
+      this.drawLand();
       this.dockIdle();
+    }
+
+    // ------------------------------------------------------------ land (build menu, LAND tab)
+    landMode() { return this.drawerOpen && this.cat === 'land' && !this.edit; }
+    drawLand() {
+      const g = this.landG;
+      g.clear();
+      if (!this.landMode() || this.ghost) return;
+      const st = this.state;
+      for (let r = 0; r < st.rows; r++) for (let c = 0; c < st.cols; c++) {
+        const opt = E.landOption(st, c, r);
+        if (!opt) continue;
+        const set = new Map([[c + ',' + r, [c, r]]]);
+        const sel = this.landSel && this.landSel.c === c && this.landSel.r === r;
+        this.dotPerimeter(g, set, sel ? 0xfee761 : (opt.to === 'g' ? 0x63c74d : 0xead4aa), sel ? 1 : 0);
+        if (sel) { const t = this.tileXY(c, r); g.fillStyle(0xfee761, 0.25).fillRect(t.x, t.y, this.T, this.T); }
+      }
+    }
+    selectLand(c, r) {
+      const opt = E.landOption(this.state, c, r);
+      if (!opt) return;
+      this.landSel = { c, r };
+      this.drawLand();
+      const cost = E.landCost(this.state), ok = this.state.wallet.bronze.gte(cost.amount);
+      this.showDock({
+        lines: ['BUY LAND', opt.to === 'g' ? 'SAND -> GRASS (BUILDABLE)' : 'SEA -> SAND', E.fmt(cost.amount)], icon: 'bronze',
+        btns: [{ label: 'BUY', fn: () => this.buyLand(c, r), tone: ok ? 'ok' : 'off' }, { icon: 'ico-no', fn: () => { this.landSel = null; this.drawLand(); this.dockIdle(); } }],
+        near: { x: this.ox + c * this.T + 8, y: this.oy + r * this.T + 16 },
+      });
+    }
+    buyLand(c, r) {
+      const res = E.buyLand(this.state, c, r);
+      if (!res) { this.floatText(this.ox + c * this.T + 8, this.oy + r * this.T, 'TOO POOR', '#e43b44'); return; }
+      this.buildTerrain();
+      this.refreshEval();
+      this.dust({ x: this.ox + c * this.T + 8, y: this.oy + r * this.T + 14 }, res.to === 'g' ? 0x63c74d : 0xead4aa);
+      this.floatText(this.ox + c * this.T + 8, this.oy + r * this.T, res.to === 'g' ? 'NEW GRASS!' : 'NEW SAND!', '#fee761');
+      this.save();
+      this.refreshCards();
+      // keep the selection going if the same tile can be upgraded again (sand -> grass)
+      if (E.landOption(this.state, c, r)) this.selectLand(c, r); else { this.landSel = null; this.drawLand(); this.dockIdle(); }
     }
 
     // ------------------------------------------------------------ placement
@@ -407,6 +648,7 @@
       if (this.ghost) this.cancel();
       if (this.edit) this.setEdit(false);
       const cat = CATS.find((c) => c.types.includes(type));
+      if (!this.drawerOpen) this.setDrawer(true);
       if (cat && cat.id !== this.cat) { this.cat = cat.id; this.buildCards(); }
       this.makeGhost(type, Core.rotations(type)[0], null);
     }
@@ -414,12 +656,15 @@
     makeGhost(type, rot, moving) {
       this.clearFocus();
       const img = this.add.image(-100, -100, this.texFor(type, rot)).setOrigin(0.5, 1).setAlpha(0.8).setDepth(2300).setVisible(false);
-      this.ghost = { type, rot, moving, img, cells: [], tileKey: null, sellArmed: false };
+      this.ghost = { type, rot, moving, img, cells: [], tileKey: null };
+      this.landSel = null;
+      this.landG.clear();
       this.refreshButtons();
       const p = this.input.activePointer;
       if (moving) this.positionGhost(moving.c, moving.r, true, true);
-      else if (!this.touch && this.inMap(p)) this.onPointerMove(p);
+      else if (!this.touch && this.inMap(this.uiPt(p))) this.onPointerMove(p);
       else this.dockGhost();
+      return this.ghost;
     }
 
     dropGhost() {
@@ -429,6 +674,7 @@
       this.ghost = null;
       this.clearAura();
       this.refreshButtons();
+      this.drawLand();
       this.dockIdle();
     }
 
@@ -442,33 +688,26 @@
       if (g.at) this.positionGhost(g.at.c, g.at.r, true); else this.dockGhost();
     }
 
+    // cancel placement; a picked-up building goes back where it was (and is returned)
     cancel() {
       const g = this.ghost;
-      if (g && g.moving) this.restoreHeld();
+      const b = g && g.moving ? this.restoreHeld() : null;
       this.dropGhost();
+      return b;
     }
-    // put a picked-up building back where it was
     restoreHeld() {
       const m = this.ghost.moving;
-      const b = Core.place(this.state, m.type, m.c, m.r, m.rot, m.id);
+      const b = Core.place(this.state, m.type, m.c, m.r, m.rot, m.id, m.level);
       if (b) { b.fill = m.fill; b.wait = m.wait; if (m.burn) b.burn = m.burn; this.addView(b); }
       this.refreshEval();
       if (B[m.type].kind === 'defense') this.rebuildDefenseLights();
       return b;
     }
-    // sell the building currently held in edit mode (asks twice)
-    sellHeld() {
-      const g = this.ghost;
-      if (!g || !g.moving) return;
-      if (!g.sellArmed) { g.sellArmed = true; this.dockGhost(); return; }
-      const b = this.restoreHeld();
-      this.dropGhost();
-      if (b) this.sell(this.views.get(b.id));
-    }
 
     positionGhost(c, r, force, exact) {
       const g = this.ghost, k = c + ',' + r;
-      if (!force && g.tileKey === k) return;
+      if (!force && !exact && g.tileKey === k) return;
+      if (!force && exact && g.origin && g.origin.c === c && g.origin.r === r) return;
       const [bw, bh] = Core.bbox(Core.rotateShape(B[g.type].shape, g.rot));
       const o = exact ? { c, r } : this.originFor(g.type, g.rot, c, r);
       g.at = exact ? { c: c + Math.floor((bw - 1) / 2), r: r + Math.floor((bh - 1) / 2) } : { c, r };
@@ -485,12 +724,12 @@
         const t = this.tileXY(cc, rr);
         return this.add.image(t.x, t.y, this.key('aura-fill')).setOrigin(0).setTint(g.ok ? 0x63c74d : 0xe43b44).setAlpha(0.55).setDepth(3);
       });
-      g.preview = chk.ok ? Core.preview(this.state, g.type, o.c, o.r, g.rot) : null;
+      g.preview = chk.ok ? Core.preview(this.state, g.type, o.c, o.r, g.rot, g.moving && g.moving.level) : null;
       this.showAura({ type: g.type, c: o.c, r: o.r, rot: g.rot }, g.preview ? g.preview.changes.map((ch) => [ch.id, ch.delta > 0]) : []);
       this.dockGhost();
     }
 
-    // dock contents while holding a building: verdict + rotate / (sell) / build / cancel
+    // dock contents while holding a building: verdict + rotate / build / cancel
     dockGhost() {
       const g = this.ghost;
       if (!g) return;
@@ -503,59 +742,49 @@
       } else {
         const pv = g.preview, own = d.base ? fmtMult(pv.self.mult) + ' ' : '';
         const net = Object.entries(pv.total).map(([cc, n]) => (n >= 0 ? '+' : '-') + fmtRate(Math.abs(n)) + (cc === 'bronze' ? '' : LETTER[cc])).join(' ') || '+0';
-        lines = [d.name, own + 'NET ' + net + '/S', g.moving ? 'MOVE: FREE' : E.fmt(cost.amount)];
+        const lv = g.moving && Core.levelOf(g.moving) > 1 ? ' LV' + Core.levelOf(g.moving) : '';
+        lines = [d.name + lv, own + 'NET ' + net + '/S', g.moving ? (g.drag ? 'LET GO TO DROP' : 'MOVE: FREE') : E.fmt(cost.amount)];
         if (!g.moving) icon = cost.cur;
       }
+      if (g.drag) { this.showDock({ lines, icon, near: g.a }); return; }   // hands are busy: info only
       const btns = [];
       if (Core.rotations(g.type).length > 1) btns.push({ icon: 'ico-rot', fn: () => this.rotate() });
-      if (g.moving) {
-        const ref = E.refundOf(this.state, g.type);
-        btns.push({ label: g.sellArmed ? 'SURE? +' + E.fmt(ref.amount) : 'SELL', fn: () => this.sellHeld(), tone: 'danger' });
-      }
       btns.push({ icon: 'ico-ok', fn: () => this.tryPlace(), tone: g.ok ? 'ok' : 'off' });
-      btns.push({ icon: 'ico-no', fn: () => this.cancel() });
+      btns.push({ icon: 'ico-no', fn: () => this.cancelAndSelect() });
       this.showDock({ lines, icon, btns, near: g.a ? { x: g.a.x, y: g.a.y } : null });
     }
-
-    onPointerMove(p) {
-      if (!p.wasTouch) this.touch = false;
-      if (!this.ghost) return;
-      if (p.wasTouch && !p.isDown) return;           // touch: ghost follows a dragging finger only
-      if (!this.inMap(p)) return;
-      const { c, r } = this.pick(p.worldX, p.worldY);
-      this.positionGhost(c, r);
+    cancelAndSelect() {
+      const b = this.cancel();
+      if (b && this.edit) this.setFocus(this.views.get(b.id), true);
     }
 
-    onPointerDown(p, over) {
-      if (p.wasTouch) this.touch = true;
-      if (p.rightButtonDown()) { if (this.ghost) this.cancel(); else if (this.edit) this.setEdit(false); else this.clearFocus(); return; }
-      if (!this.inMap(p) || over.some((o) => o.isUI)) return;
-      if (this.reportShown) this.hideReport();
-      const { c, r } = this.pick(p.worldX, p.worldY);
-      if (this.ghost) {
-        // touch: tap (or drag) previews the spot; tapping it again (or ✓) places
-        if (p.wasTouch && this.ghost.tileKey !== c + ',' + r) { this.positionGhost(c, r); return; }
-        this.positionGhost(c, r);
-        this.tryPlace();
-        return;
+    // pick a building up to move it. With a pointer it follows that finger / button
+    // (drag & drop); without, the ghost follows the mouse until clicked (desktop).
+    pickUp(v, p) {
+      const b = { ...v.b };
+      this.clearFocus();
+      this.removeView(b.id);
+      Core.remove(this.state, b.id);
+      this.refreshEval();
+      if (B[b.type].kind === 'defense') this.rebuildDefenseLights();
+      const g = this.makeGhost(b.type, b.rot, b);
+      if (p) {
+        const w = this.worldPt(p.x, p.y), t = this.pick(w.x, w.y);
+        g.drag = true; g.pointerId = p.id; g.grab = { c: t.c - b.c, r: t.r - b.r };
+        this.dockGhost();
       }
-      const v = this.viewAt(over, c, r, p.wasTouch || this.edit);
-      if (!v) { this.clearFocus(); return; }
-      if (this.edit) { this.pickUp(v); return; }
-      this.tapBuilding(v, p.wasTouch);
     }
-
-    // PLAY tap, in priority order: douse fire > fire at raider > collect > show info
-    tapBuilding(v, touch) {
-      const b = v.b;
-      if (b.burn > 0) return this.douse(v);
-      const shot = N.fire(this.state, b.id, this.cov);
-      if (shot) return this.shoot(v, shot);
-      if (B[b.type].kind === 'defense' && b.cool > 0) return this.floatText(v.x, v.sprite.y - v.sprite.height, 'RELOADING', '#8b9bb4');
-      if (E.isReady(b)) return this.collect(v);
-      if (this.focus === v && this.focusSticky) return this.clearFocus();
-      if (touch) this.setFocus(v, true);
-      else this.tweens.add({ targets: v.sprite, x: v.x + 1, duration: 40, yoyo: true, repeat: 1, onComplete: () => v.sprite.setX(v.x) });
+    moveDrag(p) {
+      const g = this.ghost, w = this.worldPt(p.x, p.y), t = this.pick(w.x, w.y);
+      this.positionGhost(t.c - g.grab.c, t.r - g.grab.r, false, true);
+    }
+    // let go: drop it if the spot is fine, otherwise it snaps back. Either way it stays selected.
+    finishDrag(abort) {
+      const g = this.ghost;
+      if (!g) return;
+      if (!abort && g.ok && g.origin) { this.tryPlace(); return; }
+      if (!abort && g.at && g.reason) this.floatText(g.img.x, g.img.y - g.img.height, g.reason, '#e43b44');
+      this.cancelAndSelect();
     }
 
     tryPlace() {
@@ -567,35 +796,32 @@
         return;
       }
       const { c, r } = g.origin;
-      const b = g.moving ? Core.place(this.state, g.type, c, r, g.rot, g.moving.id) : E.buy(this.state, g.type, c, r, g.rot);
+      const b = g.moving ? Core.place(this.state, g.type, c, r, g.rot, g.moving.id, g.moving.level) : E.buy(this.state, g.type, c, r, g.rot);
       if (!b) return;
       if (g.moving) { b.fill = g.moving.fill; b.wait = g.moving.wait; if (g.moving.burn) b.burn = g.moving.burn; }
       this.refreshEval();
-      const v = this.addView(b);
+      this.addView(b);
       this.rebuildDefenseLights();
+      const v = this.views.get(b.id);
       this.dust(v);
       const out = this.eval.get(b.id).output;
-      if (out > 0) this.floatText(v.x, v.sprite.y - v.sprite.height, '+' + fmtRate(out) + '/S', this.S.P.coin[B[b.type].cur][0]);
+      if (out > 0 && !g.moving) this.floatText(v.x, v.sprite.y - v.sprite.height, '+' + fmtRate(out) + '/S', this.S.P.coin[B[b.type].cur][0]);
       if (!g.moving) this.orderEvent({ kind: 'build', type: b.type });
       this.save();
-      if (g.moving) { this.dropGhost(); return; }
+      if (g.moving) {
+        this.dropGhost();
+        if (this.edit) this.setFocus(this.views.get(b.id), true);   // stays selected for rotate / upgrade / sell
+        return;
+      }
       this.positionGhost(g.at.c, g.at.r, true); // stay in build mode
       this.refreshCards();
     }
 
     // towers' night coverage belongs to their views; rebuild when towers change
     rebuildDefenseLights() {
+      const selId = this.focus && this.focus.b.id;
       for (const v of [...this.views.values()]) if (B[v.b.type].kind === 'defense') { this.removeView(v.b.id); this.addView(v.b); }
-    }
-
-    pickUp(v) {
-      const b = { ...v.b };
-      this.clearFocus();
-      this.removeView(b.id);
-      Core.remove(this.state, b.id);
-      this.refreshEval();
-      if (B[b.type].kind === 'defense') this.rebuildDefenseLights();
-      this.makeGhost(b.type, b.rot, b);
+      if (selId && !this.focus && this.views.get(selId) && this.edit && !this.ghost) this.setFocus(this.views.get(selId), true);
     }
 
     sell(v) {
@@ -607,8 +833,122 @@
       const ref = E.sell(this.state, v.b.id);
       this.refreshEval();
       if (wasTower) this.rebuildDefenseLights();
-      if (ref) this.floatText(x, y - 16, 'SOLD +' + E.fmt(ref.amount), this.S.P.coin[ref.cur][0]);
+      if (ref) this.floatText(x, y - 16, 'SOLD +' + ref.map((p) => E.fmt(p.amount) + LETTER[p.cur]).join(' '), '#fee761');
       this.save();
+    }
+
+    // ------------------------------------------------------------ pointer input
+    onPointerMove(p) {
+      if (!p.wasTouch) this.touch = false;
+      if (this.pinch) { if (this.input.pointer1.isDown && this.input.pointer2.isDown) this.updatePinch(); return; }
+      const g = this.ghost, pr = this.press;
+      if (g && g.drag) { if (p.id === g.pointerId) this.moveDrag(p); return; }
+      if (pr && p.id === pr.id && p.isDown) {
+        if (!pr.moved && Phaser.Math.Distance.Between(p.x, p.y, pr.sx, pr.sy) > DRAG_PX) {
+          pr.moved = true;
+          if (pr.hold) pr.hold.remove();
+          if (pr.v && this.edit && !g && this.views.get(pr.v.b.id) === pr.v) { this.press = null; this.pickUp(pr.v, p); this.moveDrag(p); return; }
+        }
+        if (pr.moved && !g && !pr.noPan) {
+          const cam = this.cameras.main;
+          cam.setScroll(pr.scrollX - (p.x - pr.sx) / cam.zoom, pr.scrollY - (p.y - pr.sy) / cam.zoom);
+          return;
+        }
+      }
+      if (!g) return;
+      if (p.wasTouch && !p.isDown) return;           // touch: ghost follows a dragging finger only
+      if (!this.inMap(this.uiPt(p))) return;
+      const w = this.worldPt(p.x, p.y), { c, r } = this.pick(w.x, w.y);
+      this.positionGhost(c, r);
+    }
+
+    onPointerDown(p, over) {
+      if (p.wasTouch) this.touch = true;
+      if (this.music) this.music.unlock();          // browsers allow sound only after a tap
+      if (this.input.pointer1.isDown && this.input.pointer2.isDown) { this.startPinch(); return; }
+      if (this.modal) return;                        // the modal's backdrop handles it
+      const u = this.uiPt(p), w = this.worldPt(p.x, p.y), cam = this.cameras.main;
+      if (p.rightButtonDown()) return this.onRightClick(over, w, u);
+      if (over.some(isUI) || !this.inMap(u)) return;
+      if (this.reportShown) this.hideReport();
+      const { c, r } = this.pick(w.x, w.y);
+      const pr = this.press = { id: p.id, sx: p.x, sy: p.y, scrollX: cam.scrollX, scrollY: cam.scrollY, moved: false };
+      if (this.ghost) {
+        pr.noPan = true;
+        if (this.ghost.drag) return;
+        // touch: tap (or drag) previews the spot; tapping it again (or ✓) places
+        if (p.wasTouch && this.ghost.tileKey !== c + ',' + r) { this.positionGhost(c, r); return; }
+        this.positionGhost(c, r);
+        this.tryPlace();
+        return;
+      }
+      if (this.ship && over.includes(this.ship)) { this.openShop(); return; }
+      if (this.shopOpen) this.closeShop();
+      if (!this.edit && this.spotHit(w)) { this.startCast(); return; }
+      const v = this.viewAt(over, c, r, p.wasTouch || this.edit);
+      if (this.edit) {
+        if (v) { pr.v = v; this.setFocus(v, true); } else pr.emptyEdit = true;
+        return;
+      }
+      if (this.landMode() && E.landOption(this.state, c, r)) { this.selectLand(c, r); return; }
+      if (this.landSel) { this.landSel = null; this.drawLand(); this.dockIdle(); }
+      if (!v) { pr.empty = true; return; }
+      // hold a building to start editing (the tap itself still collects / fires)
+      pr.v = v;
+      pr.hold = this.time.delayedCall(HOLD_MS, () => this.holdToEdit(pr));
+      this.tapBuilding(v, p.wasTouch);
+    }
+
+    onPointerUp(p) {
+      if (this.pinch) { if (!(this.input.pointer1.isDown && this.input.pointer2.isDown)) this.endPinch(); return; }
+      const g = this.ghost;
+      if (g && g.drag && p.id === g.pointerId) { this.press = null; this.finishDrag(); return; }
+      const pr = this.press;
+      if (!pr || pr.id !== p.id) return;
+      this.press = null;
+      if (pr.hold) pr.hold.remove();
+      if (pr.moved) return;
+      if (pr.emptyEdit) this.setEdit(false);          // tap empty space: done editing
+      else if (pr.empty) this.clearFocus();
+    }
+
+    // desktop: right-click a building to pick it up (it follows the mouse; left-click drops)
+    onRightClick(over, w, u) {
+      if (this.ghost) { this.cancelAndSelect(); return; }
+      const { c, r } = this.pick(w.x, w.y);
+      const v = this.viewAt(over, c, r, true);
+      if (v && this.inMap(u)) {
+        if (!this.edit) this.setEdit(true);
+        this.pickUp(this.views.get(v.b.id));
+      } else if (this.edit) this.setEdit(false);
+      else this.clearFocus();
+    }
+
+    holdToEdit(pr) {
+      if (this.press !== pr || pr.moved || this.ghost || this.modal) return;
+      const id = pr.v.b.id;
+      this.setEdit(true);
+      const v = this.views.get(id);
+      if (!v) return;
+      pr.v = v;
+      this.setFocus(v, true);
+      const y0 = v.sprite.y;
+      this.tweens.add({ targets: v.sprite, y: y0 - 3, duration: 80, yoyo: true, onComplete: () => v.sprite.active && v.sprite.setY(y0) });
+      try { navigator.vibrate && navigator.vibrate(15); } catch (e) { /* not allowed */ }
+    }
+
+    // PLAY tap, in priority order: douse fire > reel a fish > fire at raider > collect > show info
+    tapBuilding(v, touch) {
+      const b = v.b;
+      if (b.burn > 0) return this.douse(v);
+      if (this.state.fishing.cast) return this.fishTap(v);
+      const shot = N.fire(this.state, b.id, this.cov);
+      if (shot) return this.shoot(v, shot);
+      if (B[b.type].kind === 'defense' && b.cool > 0) return this.floatText(v.x, v.sprite.y - v.sprite.height, 'RELOADING', '#8b9bb4');
+      if (E.isReady(b)) return this.collect(v);
+      if (this.focus === v && this.focusSticky) return this.clearFocus();
+      if (touch) this.setFocus(v, true);
+      else this.tweens.add({ targets: v.sprite, x: v.x + 1, duration: 40, yoyo: true, repeat: 1, onComplete: () => v.sprite.setX(v.x) });
     }
 
     dust(v, col = 0xe4a672) {
@@ -627,7 +967,8 @@
 
     banner(str, color) {
       if (this.bannerObj && this.bannerObj.active) this.bannerObj.destroy();
-      const t = this.bannerObj = this.add.image(160, TOP + 26, PX.textTex(this, str, { color: color || this.S.P.accent, outline: this.S.P.worldOutline })).setOrigin(0.5, 0).setScrollFactor(0).setDepth(3300);
+      const y = TOP + (this.state.fishing.cast ? 40 : 26);
+      const t = this.bannerObj = U(this.add.image(UW / 2, y, PX.textTex(this, str, { color: color || this.S.P.accent, outline: this.S.P.worldOutline })).setOrigin(0.5, 0).setDepth(3300));
       this.tweens.add({ targets: t, alpha: 0, delay: 2600, duration: 500, onComplete: () => t.destroy() });
     }
 
@@ -645,6 +986,7 @@
       this.burst(v.x, top + 4, this.S.P.coin[got.cur]);
       if (got.perfect) { this.burst(v.x, top + 2, ['#fee761', '#ffffff']); this.floatText(v.x, top - 8, 'PERFECT!', '#fee761'); }
       this.floatText(v.x, top, '+' + E.fmt(got.amount), got.perfect ? '#fee761' : this.S.P.coin[got.cur][0]);
+      if (this.music) this.music.coin(got.cur, this.combo, got.perfect);
       this.orderEvent({ kind: 'collect', type: got.type, cur: got.cur, amount: got.amount, perfect: got.perfect, combo: this.combo });
     }
 
@@ -671,6 +1013,135 @@
       if (!left) this.save();
     }
 
+    // ------------------------------------------------------------ fishing
+    spotXY(s) { return { x: this.ox + (s.c + 0.5) * this.T, y: this.oy + (s.r + 0.5) * this.T }; }
+    spotHit(w) {
+      const s = this.state.fishing.spot;
+      if (!s || this.state.fishing.cast) return false;
+      const c = this.spotXY(s);
+      return Phaser.Math.Distance.Between(w.x, w.y, c.x, c.y) <= 13;
+    }
+    startCast() {
+      const s = this.state.fishing.spot, at = this.spotXY(s);
+      const c = F.cast(this.state);
+      if (!c) return;
+      this.clearFocus();
+      this.castAt = at;
+      this.bobber = this.add.image(at.x, at.y + 3, this.key('bobber')).setOrigin(0.5, 1).setDepth(7);
+      this.tweens.add({ targets: this.bobber, y: at.y + 4, duration: 300, yoyo: true, repeat: -1, ease: 'Stepped', easeParams: [1] });
+      this.splash(at.x, at.y);
+      this.fishPanel.fishId = null;
+      this.reel = 0;
+      this.banner('TAP BUILDINGS THAT MAKE THESE COINS', '#2ce8f5');
+    }
+    splash(x, y) {
+      for (let i = 0; i < 8; i++) {
+        const p = this.add.image(x, y, this.key('px')).setTint(i & 1 ? 0xffffff : 0x2ce8f5).setDepth(2550);
+        const vx = (Math.random() - 0.5) * 20, h = 4 + Math.random() * 8;
+        this.tweens.add({ targets: p, x: x + vx, duration: 400 });
+        this.tweens.add({ targets: p, y: y - h, duration: 180, ease: 'Quad.easeOut', yoyo: true, onComplete: () => p.destroy() });
+      }
+    }
+    fishTap(v) {
+      const res = F.tap(this.state, v.b), top = v.sprite.y - v.sprite.height;
+      if (!res) return;
+      const cur = B[v.b.type].cur;
+      if (!res.ok) {
+        this.reel = 0;
+        this.floatText(v.x, top, !cur ? 'NO COINS HERE' : res.reset ? 'WRONG! SET RESTARTS' : 'WRONG COIN', '#e43b44');
+        this.tweens.add({ targets: v.sprite, x: v.x + 1, duration: 40, yoyo: true, repeat: 1, onComplete: () => v.sprite.setX(v.x) });
+        this.fishPanel.shake = 6;
+        return;
+      }
+      this.burst(v.x, top + 4, this.S.P.coin[cur]);
+      if (this.castAt) this.splash(this.castAt.x, this.castAt.y);
+      this.reel = (this.reel || 0) + 1;              // each good tap climbs the scale
+      if (this.music) this.music.coin(cur, this.reel, !!res.caught || !!res.setDone);
+      if (res.caught) this.reel = 0;
+      if (res.caught) return this.endCast(res.caught, res.first);
+      if (res.setDone) this.floatText(this.castAt.x, this.castAt.y - 10, 'SET!', '#fee761');
+    }
+    endCast(caught, first) {
+      const at = this.castAt;
+      if (this.bobber) { this.tweens.killTweensOf(this.bobber); this.bobber.destroy(); this.bobber = null; }
+      this.castAt = null;
+      if (!caught) { this.banner('IT GOT AWAY...', '#8b9bb4'); return; }
+      const fish = F.FISH[caught];
+      const img = this.add.image(at.x, at.y, this.key('fish-' + caught)).setDepth(2600);
+      this.tweens.add({ targets: img, y: at.y - 24, duration: 500, ease: 'Quad.easeOut' });
+      this.tweens.add({ targets: img, alpha: 0, delay: 900, duration: 300, onComplete: () => img.destroy() });
+      this.burst(at.x, at.y - 6, ['#fee761', '#ffffff']);
+      this.floatText(at.x, at.y - 28, fish.rarity + '!', RARITY[fish.rarity]);
+      this.banner(first ? 'NEW FISH: ' + fish.name + '! +' + Math.round(F.BOOK_BONUS * 100) + '% INCOME' : 'CAUGHT A ' + fish.name + '!', first ? '#fee761' : '#63c74d');
+      this.save();
+    }
+    onFishing(ev) {
+      if (ev.type === 'spot') this.banner('FISH BITING! TAP THE RIPPLE', '#2ce8f5');
+      else if (ev.type === 'reset' && this.castAt && !(this.reel = 0)) this.floatText(this.castAt.x, this.castAt.y - 10, 'TOO SLOW', '#e43b44');
+      else if (ev.type === 'escaped') this.endCast(null);
+    }
+    buildFishPanel() {
+      const P = this.S.P, w = 124, h = 36, x = (UW - w) / 2, y = TOP + 2;
+      const fp = this.fishPanel = { x, y, w, h, shake: 0 };
+      fp.bg = U(this.add.rectangle(x, y, w, h, 0x181425, 0.92).setOrigin(0).setDepth(3000).setInteractive());
+      fp.g = U(this.add.graphics().setDepth(3001));
+      fp.fish = U(this.add.image(x + 3, y + 3, this.key('fish-sardine')).setOrigin(0).setDepth(3002));
+      fp.name = U(new PixelText(this, x + 22, y + 2, '', { color: P.text, outline: P.textOutline }).setOrigin(0).setDepth(3002));
+      fp.rar = U(new PixelText(this, x + 22, y + 9, '', { color: P.dim, outline: P.textOutline }).setOrigin(0).setDepth(3002));
+      fp.sets = U(new PixelText(this, x + 52, y + 19, '', { color: P.dim, outline: P.textOutline }).setOrigin(0).setDepth(3002));
+      fp.icons = [0, 1, 2, 3].map((i) => U(this.add.image(x + 3 + i * 11, y + 17, this.key('ico-bronze')).setOrigin(0).setDepth(3002)));
+      fp.quit = U(this.add.image(x + w - 8, y + 7, this.key('ico-no')).setDepth(3002));
+      fp.quitZone = U(this.add.zone(x + w - 16, y, 16, 15).setOrigin(0).setDepth(3003).setInteractive({ cursor: 'pointer' }));
+      fp.quitZone.on('pointerdown', () => { if (F.giveUp(this.state)) this.endCast(null); });
+      fp.objs = [fp.bg, fp.g, fp.fish, fp.name, fp.rar, fp.sets, ...fp.icons, fp.quit, fp.quitZone];
+    }
+    refreshFishPanel(time) {
+      const fp = this.fishPanel, c = this.state.fishing.cast, show = !!c;
+      if (fp.shown !== show) {
+        fp.shown = show;
+        for (const o of fp.objs) o.setVisible(show);
+        if (show) fp.bg.setInteractive(); else fp.bg.disableInteractive();
+        if (show) fp.quitZone.setInteractive({ cursor: 'pointer' }); else fp.quitZone.disableInteractive();
+      }
+      if (!show) return;
+      const fish = F.FISH[c.fish], dx = fp.shake > 0 ? ((fp.shake-- & 2) ? 1 : -1) : 0, x = fp.x + dx, y = fp.y;
+      if (fp.fishId !== c.fish) {
+        fp.fishId = c.fish;
+        fp.fish.setTexture(this.key('fish-' + c.fish));
+        fp.name.setText(fish.name);
+        fp.rar.opt.color = RARITY[fish.rarity]; fp.rar.str = null; fp.rar.setText(fish.rarity);
+      }
+      fp.bg.setX(x); fp.fish.setX(x + 3); fp.name.setX(x + 22); fp.rar.setX(x + 22); fp.sets.setX(x + 52);
+      const blink = Math.floor(time / 200) & 1;
+      fp.icons.forEach((im, i) => {
+        const on = i < c.set.length;
+        im.setVisible(on).setX(x + 3 + i * 11);
+        if (!on) return;
+        im.setTexture(this.key('ico-' + c.set[i]));
+        im.setAlpha(i < c.pos ? 0.3 : i === c.pos ? (blink ? 1 : 0.6) : 1);
+      });
+      fp.sets.setText(c.sets < 2 ? 'SETS ' + c.sets + '/2' : 'REEL IN!');
+      const g = fp.g.clear(), P = this.S.P;
+      g.fillStyle(hex(P.panel.light), 1).fillRect(x, y, fp.w, 1).fillRect(x, y + fp.h - 1, fp.w, 1).fillRect(x, y, 1, fp.h).fillRect(x + fp.w - 1, y, 1, fp.h);
+      // time left for the next tap in this set
+      if (c.pos > 0) g.fillStyle(0xfee761, 1).fillRect(x + 3, y + 28, Math.ceil(c.set.length * 11 * c.window / F.WINDOW), 1);
+      // the gauge: fill it to land the fish, it drains all the time
+      const gw = fp.w - 6;
+      g.fillStyle(0x000000, 0.7).fillRect(x + 3, y + 30, gw, 4);
+      g.fillStyle(c.gauge < 0.25 ? 0xe43b44 : 0x63c74d, 1).fillRect(x + 3, y + 31, Math.max(0, Math.round((gw) * c.gauge)), 2);
+    }
+    // ripples on the water where a fish is biting, the bobber while one is hooked
+    drawRipple(time) {
+      const g = this.rippleG.clear(), s = this.state.fishing.spot;
+      if (!s) return;
+      const { x, y } = this.spotXY(s), t = time / 1000;
+      for (let k = 0; k < 3; k++) {
+        const ph = (t * 0.8 + k / 3) % 1, rad = 2 + ph * 9;
+        g.lineStyle(1, 0xffffff, 0.9 * (1 - ph)).strokeEllipse(x, y, rad * 2, rad * 1.2);
+      }
+      if (Math.floor(t * 3) % 4 === 0) g.fillStyle(0x2ce8f5, 1).fillRect(Math.round(x + Math.sin(t * 5) * 3), y - 1, 2, 1);
+    }
+
     // ------------------------------------------------------------ orders
     orderEvent(evt) {
       const res = O.record(this.state, evt);
@@ -681,26 +1152,136 @@
     buildOrderCard() {
       const P = this.S.P;
       this.orderCard = {
-        g: this.add.graphics().setScrollFactor(0).setDepth(3000),
-        l1: new PixelText(this, 0, 0, '', { color: P.accent, outline: P.textOutline }).setOrigin(0).setScrollFactor(0).setDepth(3001),
-        l2: new PixelText(this, 0, 0, '', { color: P.text, outline: P.textOutline }).setOrigin(0).setScrollFactor(0).setDepth(3001),
-        icon: this.add.image(0, 0, this.key('ico-bronze')).setOrigin(0).setScrollFactor(0).setDepth(3001),
+        g: U(this.add.graphics().setDepth(3000)),
+        l1: U(new PixelText(this, 0, 0, '', { color: P.accent, outline: P.textOutline }).setOrigin(0).setDepth(3001)),
+        l2: U(new PixelText(this, 0, 0, '', { color: P.text, outline: P.textOutline }).setOrigin(0).setDepth(3001)),
+        icon: U(this.add.image(0, 0, this.key('ico-bronze')).setOrigin(0).setDepth(3001)),
       };
     }
+    // top corner opposite the menu
+    cornerX(w) { return this.side === 'left' ? UW - 2 - w : 2; }
     refreshOrderCard() {
-      const oc = this.orderCard, a = this.state.orders.active, show = !!a && this.state.cycle.phase === 'day';
+      const oc = this.orderCard, a = this.state.orders.active;
+      const show = !!a && this.state.cycle.phase === 'day' && !this.state.fishing.cast;
       oc.g.setVisible(show); oc.l1.setVisible(show); oc.l2.setVisible(show); oc.icon.setVisible(show);
       if (!show) return;
       oc.l1.setText('ORDER: ' + a.text);
       oc.l2.setText(O.progressText(a) + '   +' + E.fmt(a.reward));
       const w = Math.max(oc.l1.width, oc.l2.width + 10) + 6, h = 20;
-      const x = this.side === 'left' ? 318 - w : (this.drawerOpen ? DW + 2 : 2), y = TOP + 2;
+      const x = this.cornerX(w), y = TOP + 2;
       if (oc.w !== w || oc.x !== x) {
         oc.w = w; oc.x = x;
         oc.g.clear().fillStyle(0x181425, 0.85).fillRect(x, y, w, h).fillStyle(0x63c74d, 1).fillRect(x, y, 1, h);
       }
       oc.l1.setPosition(x + 3, y + 2); oc.l2.setPosition(x + 3, y + 11);
       oc.icon.setPosition(x + 3 + oc.l2.width + 1, y + 10);
+    }
+
+    // ------------------------------------------------------------ merchant ship
+    buildShip() {
+      this.ship = this.add.image(500, 140, this.key('ship')).setOrigin(0.5, 1).setDepth(7).setVisible(false).setInteractive({ pixelPerfect: true, alphaTolerance: 1, cursor: 'pointer' });
+      this.shipShown = false;
+      this.shipBob = this.tweens.add({ targets: this.ship, y: 139, duration: 600, yoyo: true, repeat: -1, ease: 'Stepped', easeParams: [1] });
+    }
+    refreshShip() {
+      const here = M.here(this.state), ship = this.ship;
+      if (here && !this.shipShown) {
+        this.shipShown = true;
+        ship.setVisible(true).setX(500).setTexture(this.key('ship'));
+        this.tweens.add({ targets: ship, x: 290, duration: 5000, ease: 'Sine.easeOut' });
+        this.banner('MERCHANT SHIP ARRIVED - TAP IT', '#fee761');
+      } else if (!here && this.shipShown) {
+        this.shipShown = false;
+        if (this.shopOpen) this.closeShop();
+        this.tweens.add({ targets: ship, x: 520, duration: 5000, ease: 'Sine.easeIn', onComplete: () => ship.setVisible(false) });
+      }
+      if (this.shopOpen && here) this.dockShop();
+    }
+    openShop() {
+      if (!M.here(this.state)) return;
+      if (this.ghost) this.cancel();
+      this.clearFocus();
+      this.shopOpen = true;
+      this.ship.setTexture(this.key('ship-hl'));
+      this.dockShop(true);
+    }
+    closeShop() {
+      this.shopOpen = false;
+      this.ship.setTexture(this.key('ship'));
+      this.dockIdle();
+    }
+    dockShop(force) {
+      const m = M.ensure(this.state), left = Math.ceil(m.leaveAt - this.state.cycle.t);
+      const key = m.sold.join() + '|' + left + '|' + E.fmt(this.state.wallet.bronze) + E.fmt(this.state.wallet.silver);
+      if (!force && key === this.shopKey) return;
+      this.shopKey = key;
+      const it = M.items(this.state);
+      const offers = M.offers(this.state);
+      const lines = offers.map((o) => o.name + (o.item ? ' (' + it[o.item] + ')' : '') + ': ' + o.desc);
+      const btns = offers.map((o) => {
+        const full = o.item && it[o.item] >= M.MAX_ITEM, can = this.state.wallet[o.cost.cur].gte(o.cost.amount);
+        const label = o.sold ? 'SOLD' : full ? 'FULL' : E.fmt(o.cost.amount) + LETTER[o.cost.cur];
+        return { label, tone: o.sold || full || !can ? 'off' : 'ok', fn: () => this.buyOffer(o.i) };
+      });
+      btns.push({ icon: 'ico-no', fn: () => this.closeShop() });
+      lines.unshift('MERCHANT - LEAVES IN ' + left + 'S');
+      this.showDock({ lines, btns });
+    }
+    buyOffer(i) {
+      const o = M.buy(this.state, i);
+      if (!o) { this.floatText(this.ship.x, this.ship.y - 30, 'CAN\'T BUY', '#e43b44'); return; }
+      this.floatText(this.ship.x, this.ship.y - 30, 'BOUGHT ' + o.name, '#fee761');
+      this.burst(this.ship.x, this.ship.y - 20, ['#fee761', '#ffffff']);
+      this.save();
+      this.dockShop(true);
+      this.refreshCards();
+    }
+
+    // ------------------------------------------------------------ night toolbar
+    // dusk & night: shows your merchant tools; the cannon is fired from here
+    buildItemBar() {
+      const P = this.S.P;
+      const bar = this.itemBar = { g: U(this.add.graphics().setDepth(3000)), parts: [] };
+      for (const k of ITEMS) {
+        const icon = U(this.add.image(0, 0, this.key('item-' + k)).setOrigin(0).setDepth(3001));
+        const txt = U(new PixelText(this, 0, 0, '0', { color: P.text, outline: P.textOutline }).setOrigin(0).setDepth(3001));
+        bar.parts.push({ k, icon, txt });
+      }
+      bar.zone = U(this.add.zone(0, 0, 10, 10).setOrigin(0).setDepth(3002).setInteractive({ cursor: 'pointer' }));
+      bar.zone.on('pointerdown', () => this.fireCannon());
+    }
+    refreshItemBar() {
+      const bar = this.itemBar, ph = this.state.cycle.phase, show = ph === 'dusk' || ph === 'night';
+      bar.g.setVisible(show); bar.zone.setVisible(show);
+      for (const p of bar.parts) { p.icon.setVisible(show); p.txt.setVisible(show); }
+      if (!show) { bar.zone.disableInteractive(); return; }
+      const it = M.items(this.state), w = 66, h = 13;
+      const x = this.cornerX(w), y = TOP + 2;
+      const armed = ph === 'night' && it.cannon > 0;
+      if (bar.key !== x + '|' + armed) {
+        bar.key = x + '|' + armed;
+        bar.g.clear().fillStyle(0x181425, 0.85).fillRect(x, y, w, h);
+        bar.g.fillStyle(armed ? 0xa22633 : 0x3a4466, 1).fillRect(x + 44, y + 1, 21, h - 2);
+      }
+      bar.parts.forEach((p, i) => { p.icon.setPosition(x + 2 + i * 22, y + 1); p.txt.setText(String(it[p.k])).setPosition(x + 13 + i * 22, y + 4); });
+      bar.zone.setPosition(x + 42, y - 2).setSize(24, h + 4).setInteractive({ cursor: 'pointer' });
+    }
+    fireCannon() {
+      const res = N.cannon(this.state);
+      const cam = this.cameras.main;
+      if (!res) { const w = this.worldPt(cam.width / 2, cam.height * 0.3); this.floatText(w.x, w.y, this.state.cycle.phase !== 'night' ? 'WAIT FOR NIGHT' : 'NO CANNONBALLS', '#8b9bb4'); return; }
+      const rv = this.raiders.get(res.raider);
+      if (rv) {
+        const from = this.worldPt(cam.width / 2, cam.height * 0.85);
+        const ball = this.add.image(from.x, from.y, this.key('item-cannon')).setDepth(2200);
+        this.tweens.add({ targets: ball, x: rv.img.x, y: rv.img.y, duration: 450, ease: 'Quad.easeIn', onComplete: () => {
+          ball.destroy();
+          cam.shake(120, 0.003);
+          this.burst(rv.img.x, rv.img.y, ['#ffffff', '#f77622']);
+          if (res.sunk) this.sinkRaider(rv, res.loot);
+        } });
+      }
+      this.save();
     }
 
     // ------------------------------------------------------------ raiders
@@ -718,7 +1299,7 @@
         const img = this.add.image(pos.x, pos.y, this.key('canoe')).setDepth(6).setFlipX(L.tx < L.sx).setScale(sc);
         const pips = r.seq.map((c) => this.add.image(0, 0, this.key(c === 'tower' ? 'cat-defense' : 'ico-' + c)).setDepth(2210));
         const eyes = [6, 11, 15].map(() => this.add.image(0, 0, this.key('light-eye')).setBlendMode(Phaser.BlendModes.ADD).setDepth(2150).setScale(sc));
-        const rv = { r, img, pips, eyes, sc, pipsAbove: L.sy > 40 };
+        const rv = { r, img, pips, eyes, sc, pipsAbove: L.sy > L.ty };
         img.setAlpha(0);
         this.tweens.add({ targets: img, alpha: 1, duration: 800 });
         this.raiders.set(r.id, rv);
@@ -744,6 +1325,23 @@
         e.setPosition(Math.round(pos.x + (rv.img.flipX ? -ex : ex)), pos.y - 3 * rv.sc).setAlpha(this.night ? rv.img.alpha : 0);
       });
     }
+    // raiders outside the view get a blinking marker on the screen edge, pointing at them
+    drawEdgeMarkers(time) {
+      const g = this.edgeG.clear();
+      if (!this.raiders.size) return;
+      const left = this.side === 'left', x0 = (left ? RAIL : 0) + 4, x1 = (left ? UW : UW - RAIL) - 5, y0 = TOP + 4, y1 = UH - 5;
+      const blink = Math.floor(time / 300) & 1;
+      for (const rv of this.raiders.values()) {
+        const u = this.toUI(rv.img.x, rv.img.y);
+        if (u.x >= x0 && u.x <= x1 && u.y >= y0 && u.y <= y1) continue;
+        const x = Math.round(clamp(u.x, x0, x1)), y = Math.round(clamp(u.y, y0, y1)), s = rv.r.boss ? 3 : 2;
+        g.fillStyle(0x181425, 1).fillRect(x - s - 1, y - s - 1, s * 2 + 3, s * 2 + 3);
+        g.fillStyle(blink ? 0xe43b44 : 0xf77622, 1).fillRect(x - s, y - s, s * 2 + 1, s * 2 + 1);
+        // a little tick pointing towards the raider
+        const dx = Math.sign(Math.round(u.x - x)), dy = Math.sign(Math.round(u.y - y));
+        g.fillStyle(0xffffff, 1).fillRect(x + dx * (s + 1), y + dy * (s + 1), 1, 1);
+      }
+    }
 
     shoot(v, shot) {
       const rv = this.raiders.get(shot.raider);
@@ -762,7 +1360,7 @@
       const bolt = this.add.image(sx, sy, this.key('bolt')).setBlendMode(Phaser.BlendModes.ADD).setDepth(2200);
       this.burst(v.x, v.sprite.y - v.sprite.height + 4, isTower ? ['#2ce8f5', '#ffffff'] : this.S.P.coin[B[v.b.type].cur]);
       this.tweens.add({
-        targets: bolt, x: tgt.x, y: tgt.y, duration: 160 + Phaser.Math.Distance.Between(sx, sy, tgt.x, tgt.y) * 2,
+        targets: bolt, x: tgt.x, y: tgt.y, duration: 160 + Math.min(600, Phaser.Math.Distance.Between(sx, sy, tgt.x, tgt.y) * 2),
         onComplete: () => {
           bolt.destroy();
           if (!rv) return;
@@ -775,6 +1373,7 @@
       this.combo = this.comboLeft > 0 ? this.combo + 1 : 1;
       this.comboLeft = E.COMBO_WINDOW * 1000;
       this.comboText.setVisible(this.combo >= 2).setText('VOLLEY x' + this.combo);
+      if (this.music) this.music.coin(isTower ? 'silver' : B[v.b.type].cur, this.combo, false);
     }
 
     sinkRaider(rv, loot) {
@@ -793,6 +1392,10 @@
         rv.eyes.forEach((e) => e.destroy());
         this.raiders.delete(ev.raider);
       }
+      if (ev.saved) {
+        const v = this.views.get(ev.saved);
+        if (v) this.floatText(v.x, v.sprite.y - v.sprite.height, 'BUCKET SAVED IT!', '#2ce8f5');
+      }
       if (ev.fire) {
         const v = this.views.get(ev.fire);
         if (v) { this.syncFlame(v); this.floatText(v.x, v.sprite.y - v.sprite.height, 'FIRE! TAP x' + N.BURN_TAPS, '#f77622'); }
@@ -802,8 +1405,8 @@
 
     // ------------------------------------------------------------ day / night
     buildNight() {
-      const P = this.S.P;
-      this.nightOverlay = this.add.rectangle(-20, 0, 360, 180, P.nightTint).setOrigin(0).setBlendMode(Phaser.BlendModes.MULTIPLY).setDepth(2000);
+      const P = this.S.P, wb = this.S.world;
+      this.nightOverlay = this.add.rectangle(wb.x0, wb.y0, wb.w, wb.h, P.nightTint).setOrigin(0).setBlendMode(Phaser.BlendModes.MULTIPLY).setDepth(2000);
       this.fireflies = [];
       for (let i = 0; i < 12; i++) {
         const f = this.add.image(60 + Math.random() * 200, 40 + Math.random() * 110, this.key('light-dot')).setBlendMode(Phaser.BlendModes.ADD).setDepth(2160);
@@ -829,19 +1432,24 @@
         if (v) this.floatText(v.x + 6, v.sprite.y - v.sprite.height + 4, '-' + E.fmt(ev.amount), '#e43b44');
         return;
       }
+      if (ev.type === 'saved') {
+        const v = this.views.get(ev.id);
+        if (v) this.floatText(v.x, v.sprite.y - v.sprite.height, 'BUCKET SAVED IT!', '#2ce8f5');
+        return;
+      }
+      if (ev.type === 'net') { this.banner('NET CAST: RAIDERS SLOWED', '#2ce8f5'); return; }
       if (ev.type === 'spread') {
         const v = this.views.get(ev.id);
         if (v) { this.syncFlame(v); this.floatText(v.x, v.sprite.y - v.sprite.height - 6, 'FIRE SPREAD!', '#f77622'); }
         return;
       }
-      if (ev.type !== 'land' && !this.ghost) this.clearFocus();
+      if (ev.type !== 'land' && !this.ghost && !this.edit) this.clearFocus();
       if (ev.type === 'dusk') {
-        this.wasOpen = this.drawerOpen;
         this.setDrawer(false);
         this.setNight(true);
         this.spawnRaiders();
         const boss = this.state.cycle.raiders.some((r) => r.boss);
-        this.banner(boss ? 'WAR CANOE SPOTTED! GUARD YOUR COAST' : 'RAIDERS SPOTTED! GUARD YOUR COAST', '#f77622');
+        this.banner(boss ? 'WAR CANOE SPOTTED! GUARD YOUR COAST' : 'RAIDERS SPOTTED! ' + (this.touch ? 'PINCH' : 'SCROLL') + ' OUT TO SEE THEM', '#f77622');
       } else if (ev.type === 'night') {
         this.banner(this.touch ? 'TAP GUARDED BUILDINGS TO FIRE' : 'CLICK GUARDED BUILDINGS TO FIRE', '#2ce8f5');
       } else if (ev.type === 'land') {
@@ -852,7 +1460,6 @@
         this.showReport(ev.report);
       } else if (ev.type === 'day') {
         this.hideReport();
-        if (this.wasOpen) this.setDrawer(true);
         this.banner('DAY ' + ev.day);
         O.next(this.state);
       }
@@ -874,12 +1481,12 @@
         ['LOST ' + (bag(rep.stolen) || '-') + (rep.fires ? '  FIRES ' + rep.fires : ''), rep.landed ? '#e43b44' : P.dim],
       ];
       const objs = [];
-      const g = this.add.graphics().setScrollFactor(0).setDepth(3600);
-      const w = 150, h = 48, x = 85, y = 60;
+      const g = U(this.add.graphics().setDepth(3600));
+      const w = 150, h = 48, x = (UW - w) / 2, y = 60;
       g.fillStyle(0x181425, 0.94).fillRect(x, y, w, h).fillStyle(hex(P.panel.light), 1)
         .fillRect(x, y, w, 1).fillRect(x, y + h - 1, w, 1).fillRect(x, y, 1, h).fillRect(x + w - 1, y, 1, h);
       objs.push(g);
-      lines.forEach(([s, c], i) => objs.push(this.add.image(160, y + 5 + i * 10, PX.textTex(this, s, { color: c, outline: P.textOutline })).setOrigin(0.5, 0).setScrollFactor(0).setDepth(3601)));
+      lines.forEach(([s, c], i) => objs.push(U(this.add.image(UW / 2, y + 5 + i * 10, PX.textTex(this, s, { color: c, outline: P.textOutline })).setOrigin(0.5, 0).setDepth(3601))));
       this.reportObjs = objs; this.reportShown = true;
     }
     hideReport() {
@@ -887,35 +1494,54 @@
       this.reportObjs = []; this.reportShown = false;
     }
 
-    // ------------------------------------------------------------ drawer
+    // ------------------------------------------------------------ menu rail + build drawer
+    buildRail() {
+      const k = this.key, x0 = this.railX();
+      U(this.add.image(x0, TOP, k('rail')).setOrigin(0).setDepth(3000).setInteractive());
+      const items = [
+        { id: 'build', icon: 'ico-build', tip: ['BUILD', 'BUILDINGS AND LAND (TAB)'], fn: () => this.setDrawer(!this.drawerOpen) },
+        { id: 'edit', icon: 'tool-move', tip: ['EDIT', 'MOVE, UPGRADE, SELL (E)', 'OR HOLD A BUILDING'], fn: () => this.setEdit(!this.edit) },
+        { id: 'book', icon: 'ico-book', tip: ['FISH BOOK', 'YOUR CATCH (B)'], fn: () => this.openBook() },
+        { id: 'gear', icon: 'ico-gear', tip: ['SETTINGS'], fn: () => this.openSettings() },
+      ];
+      this.rail = {};
+      items.forEach((it, i) => {
+        const y = TOP + 3 + i * 21;
+        const bg = U(this.add.image(x0 + 1, y, k('railbtn')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
+        U(this.add.image(x0 + 10, y + 9, k(it.icon)).setDepth(3002));
+        bg.on('pointerdown', () => { if (this.ghost && it.id !== 'build') this.cancel(); it.fn(); });
+        bg.on('pointerover', (p) => { if (!p.wasTouch && !this.ghost && !this.focus) this.showDock({ lines: it.tip }); });
+        bg.on('pointerout', (p) => { if (!p.wasTouch && !this.ghost && !this.focus) this.dockIdle(); });
+        this.rail[it.id] = bg;
+      });
+      // how many fish are waiting in the hold, on the book button
+      this.holdBadge = U(this.add.image(x0 + 16, TOP + 3 + 2 * 21 + 15, PX.textTex(this, '0', { color: '#fee761', outline: this.S.P.textOutline })).setDepth(3003).setVisible(false));
+    }
+    refreshRail() {
+      if (!this.rail) return;
+      this.rail.build.setTexture(this.key(this.drawerOpen ? 'railbtn-sel' : 'railbtn'));
+      this.rail.edit.setTexture(this.key(this.edit ? 'railbtn-sel' : 'railbtn'));
+      this.rail.book.setTexture(this.key(this.modal && this.modal.kind === 'book' ? 'railbtn-sel' : 'railbtn'));
+      this.rail.gear.setTexture(this.key(this.modal && this.modal.kind === 'settings' ? 'railbtn-sel' : 'railbtn'));
+    }
+
     buildDrawer() {
       const k = this.key, P = this.S.P;
       this.drawer = { objs: [], cards: [] };
       const d = this.drawer, x0 = this.drawerX();
-      const ui = (o) => { o.isUI = true; o.setScrollFactor(0); d.objs.push(o); return o; };
+      const ui = (o) => { U(o); d.objs.push(o); return o; };
       ui(this.add.image(x0, TOP, k('drawer')).setOrigin(0).setDepth(3000).setInteractive());
       d.tabs = CATS.map((cat, i) => {
         const tx = x0 + 1 + (i % 2) * 12, ty = TOP + 2 + Math.floor(i / 2) * 12;
         const bg = ui(this.add.image(tx, ty, k('tab')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
         ui(this.add.image(tx + 6, ty + 6, k(cat.icon)).setDepth(3002));
-        bg.on('pointerdown', () => { this.cat = cat.id; this.buildCards(); });
+        bg.on('pointerdown', () => { if (this.ghost) this.cancel(); this.cat = cat.id; this.landSel = null; this.buildCards(); this.drawLand(); this.dockIdle(); });
         bg.on('pointerover', (p) => { if (!p.wasTouch && !this.ghost) this.showDock({ lines: [cat.name] }); });
         bg.on('pointerout', (p) => { if (!p.wasTouch && !this.ghost) this.dockIdle(); });
         return { cat: cat.id, bg };
       });
-      // EDIT toggle
-      d.editBtn = ui(this.add.image(x0 + 1, TOP + 27, k('editbtn')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
-      ui(new PixelText(this, x0 + 13, TOP + 30, 'EDIT', { color: P.text, outline: P.textOutline }).setOrigin(0.5, 0).setDepth(3002));
-      d.editBtn.on('pointerdown', () => this.setEdit(!this.edit));
-      const hb = ui(this.add.image(x0 + 1, 180 - 11, k('handle')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
-      ui(new PixelText(this, x0 + 13, 180 - 9, this.side === 'left' ? '<<' : '>>', { color: P.text, outline: P.textOutline }).setOrigin(0.5, 0).setDepth(3002));
-      hb.on('pointerdown', () => this.setDrawer(false));
-      const px = this.side === 'left' ? 0 : 310;
-      d.pull = [
-        ui(this.add.image(px, 76, k('pull')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' })),
-        ui(new PixelText(this, px + 5, 87, this.side === 'left' ? '>' : '<', { color: P.text, outline: P.textOutline }).setOrigin(0.5, 0).setDepth(3002)),
-      ];
-      d.pull[0].on('pointerdown', () => this.setDrawer(true));
+      // the LAND tab's single card: next tile's price
+      d.landPrice = ui(new PixelText(this, 0, 0, '', { color: P.text, outline: P.textOutline }).setOrigin(0.5, 0).setDepth(3002));
       this.buildCards();
     }
 
@@ -925,16 +1551,24 @@
       d.cards = [];
       for (const t of d.tabs) t.bg.setTexture(k(t.cat === this.cat ? 'tab-sel' : 'tab'));
       const cat = CATS.find((c) => c.id === this.cat);
+      const ui = (objs, o) => { U(o); objs.push(o); return o; };
+      if (cat.id === 'land') {
+        const objs = [], x = x0 + 1, y = TOP + 40;
+        const bg = ui(objs, this.add.image(x, y, k('card22')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
+        ui(objs, this.add.image(x + 12, y + 7, k('cat-land')).setDepth(3002));
+        bg.on('pointerdown', () => this.dockIdle());
+        d.landPrice.setPosition(x + 12, y + 13);
+        d.cards.push({ type: 'land', bg, objs });
+      }
       cat.types.forEach((type, j) => {
         const x = x0 + 1, y = TOP + 40 + j * 23, objs = [];
-        const ui = (o) => { o.isUI = true; o.setScrollFactor(0); objs.push(o); return o; };
-        const bg = ui(this.add.image(x, y, k('card22')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
+        const bg = ui(objs, this.add.image(x, y, k('card22')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
         const tex = this.texFor(type, 0), f = this.textures.getFrame(tex);
         const w = Math.min(f.width, 20), h = Math.min(f.height, 12);
         const cx = Math.floor((f.width - w) / 2), cy = S.art[type].cardCrop != null ? S.art[type].cardCrop : Math.max(0, f.height - h - 2);
-        const im = ui(this.add.image(0, 0, tex).setOrigin(0).setDepth(3002).setCrop(cx, cy, w, h));
+        const im = ui(objs, this.add.image(0, 0, tex).setOrigin(0).setDepth(3002).setCrop(cx, cy, w, h));
         im.setPosition(x + 12 - Math.floor(w / 2) - cx, y + 2 - cy);
-        const glyph = ui(this.add.image(x + 12, y + 17, this.shapeGlyph(type)).setDepth(3002));
+        const glyph = ui(objs, this.add.image(x + 12, y + 17, this.shapeGlyph(type)).setDepth(3002));
         const info = () => this.showDock({
           lines: [B[type].name, B[type].desc, E.fmt(E.costOf(this.state, type).amount) + (Core.rotations(type).length > 1 ? '  ' + Core.rotations(type).length + ' WAYS' : '')],
           icon: B[type].cost[0],
@@ -949,20 +1583,21 @@
       this.refreshCards();
     }
 
-    setDrawer(open, instant) {
+    setDrawer(open) {
+      const was = this.drawerOpen;
       this.drawerOpen = open;
       const d = this.drawer;
       if (!d) return;
+      if (open && this.edit) this.setEdit(false);
+      if (!open && this.ghost && !this.ghost.moving) this.cancel();
       const all = [...d.objs, ...d.cards.flatMap((c) => c.objs)];
-      for (const o of all) if (!d.pull.includes(o)) o.setVisible(open);
-      for (const o of d.pull) o.setVisible(!open);
-      // keep the island centred in whatever the drawer leaves free
-      const target = open ? (this.side === 'left' ? -DW / 2 : DW / 2) : 0;
-      const cam = this.cameras.main;
-      this.tweens.killTweensOf(cam);
-      if (instant) cam.setScroll(Math.round(target), 0);
-      else this.tweens.add({ targets: cam, scrollX: target, duration: 180, ease: 'Sine.easeOut', onUpdate: () => cam.setScroll(Math.round(cam.scrollX), 0) });
+      for (const o of all) o.setVisible(open);
+      d.landPrice.setVisible(open && this.cat === 'land');
+      if (was !== open) this.landSel = null;
+      this.refreshRail();
+      this.drawLand();
       this.orderCard && (this.orderCard.w = -1);
+      if (this.itemBar) this.itemBar.key = null;
       if (this.ghost) this.dockGhost(); else if (this.focus) this.dockForBuilding(this.focus); else this.dockIdle();
     }
 
@@ -983,31 +1618,137 @@
     refreshCards() {
       if (!this.drawer) return;
       for (const c of this.drawer.cards) {
+        if (c.type === 'land') continue;
         const a = E.canAfford(this.state, c.type) ? 1 : 0.4;
         c.im.setAlpha(a); c.glyph.setAlpha(a);
       }
+      const cost = E.landCost(this.state);
+      this.drawer.landPrice.setText(E.fmt(cost.amount)).setAlpha(this.state.wallet.bronze.gte(cost.amount) ? 1 : 0.5);
+      // fish waiting to be sold
+      const n = F.IDS.reduce((a, id) => a + (this.state.fish[id] || 0), 0);
+      if (this.holdBadge && this.holdBadgeN !== n) {
+        this.holdBadgeN = n;
+        this.holdBadge.setTexture(PX.textTex(this, String(Math.min(n, 99)), { color: '#fee761', outline: this.S.P.textOutline })).setVisible(n > 0);
+      }
+    }
+
+    // ------------------------------------------------------------ modals (fish book, settings)
+    // modal = centred panel over a dimmed backdrop; tapping the backdrop closes it
+    openModal(kind, title, w, rows) {
+      this.closeModal();
+      if (this.ghost) this.cancel();
+      this.clearFocus();
+      const P = this.S.P, objs = [], RH = 16, h = 22 + rows.length * RH + 4;
+      const x = Math.round((UW - w) / 2), y = Math.max(TOP + 2, Math.round((UH - h) / 2));
+      const add = (o) => { U(o); objs.push(o); return o; };
+      const back = add(this.add.rectangle(0, 0, UW, UH, 0x000000, 0.45).setOrigin(0).setDepth(3700).setInteractive());
+      back.on('pointerdown', () => this.closeModal());
+      add(this.add.rectangle(x, y, w, h, 0x181425, 0.97).setOrigin(0).setDepth(3701).setInteractive());
+      const g = add(this.add.graphics().setDepth(3702));
+      g.fillStyle(hex(P.panel.light), 1).fillRect(x, y, w, 1).fillRect(x, y + h - 1, w, 1).fillRect(x, y, 1, h).fillRect(x + w - 1, y, 1, h);
+      const text = (tx, ty, s, color, ox = 0) => add(this.add.image(tx, ty, PX.textTex(this, s, { color: color || P.text, outline: P.textOutline })).setOrigin(ox, 0).setDepth(3703));
+      const button = (bx, by, label, tone, fn, icon) => {
+        const bw = icon ? 16 : PX.measure(label) + 10;
+        this.drawBtn(g, bx - bw, by, bw, tone);
+        if (icon) add(this.add.image(bx - bw / 2, by + 6, this.key(icon)).setDepth(3703));
+        else text(bx - bw + 5, by + 3, label, P.text);
+        const z = add(this.add.zone(bx - bw - 1, by - 2, bw + 2, 16).setOrigin(0).setDepth(3704).setInteractive({ cursor: 'pointer' }));
+        z.on('pointerdown', fn);
+      };
+      text(x + 5, y + 5, title[0], P.accent);
+      if (title[1]) text(x + 5 + PX.measure(title[0]) + 6, y + 5, title[1], P.dim);
+      button(x + w - 4, y + 3, '', null, () => this.closeModal(), 'ico-no');
+      rows.forEach((row, i) => {
+        const ry = y + 22 + i * RH;
+        let tx = x + 6;
+        if (row.img) {
+          const im = add(this.add.image(tx, ry + 1, this.key(row.img)).setOrigin(0).setDepth(3703));
+          if (row.dark) im.setTintFill(0x3a4466);
+          tx += im.width + 4;
+        }
+        text(tx, ry, row.text, row.color);
+        if (row.sub) text(tx, ry + 7, row.sub, row.subColor || P.dim);
+        if (row.btn) button(x + w - 5, ry + 1, row.btn.label, row.btn.tone, row.btn.fn);
+      });
+      this.modal = { kind, objs };
+      this.refreshRail();
+    }
+    closeModal() {
+      if (!this.modal) return;
+      for (const o of this.modal.objs) o.destroy();
+      this.modal = null;
+      this.refreshRail();
+    }
+
+    openBook() {
+      if (this.modal && this.modal.kind === 'book') { this.closeModal(); return; }
+      const st = this.state, bonus = Math.round((F.bookBonus(st) - 1) * 100);
+      const rows = F.IDS.map((id) => {
+        const f = F.FISH[id], seen = (st.fishBook[id] || 0) > 0, hold = st.fish[id] || 0;
+        const price = Object.entries(f.price).map(([c, v]) => E.fmt(v) + LETTER[c]).join(' ');
+        return {
+          img: 'fish-' + id, dark: !seen,
+          text: seen ? f.name + '  ' + f.rarity : '??? ' + f.rarity, color: seen ? RARITY[f.rarity] : this.S.P.dim,
+          sub: seen ? 'CAUGHT ' + st.fishBook[id] + '  HOLD ' + hold + '  ' + price + ' EACH' : 'NOT CAUGHT YET',
+          btn: hold ? { label: 'SELL ' + hold, tone: 'ok', fn: () => this.sellFish(id) } : null,
+        };
+      });
+      rows.push({ text: 'TAP RIPPLES ON THE WATER BY DAY TO FISH', color: this.S.P.dim });
+      this.openModal('book', ['FISH BOOK', 'EACH NEW KIND: +' + Math.round(F.BOOK_BONUS * 100) + '% INCOME (NOW +' + bonus + '%)'], 250, rows);
+    }
+    sellFish(id) {
+      const res = F.sell(this.state, id);
+      if (!res) return;
+      this.banner('SOLD ' + res.n + ' ' + F.FISH[id].name + ' +' + bag(res.got), '#fee761');
+      this.save();
+      this.closeModal();
+      this.openBook();
+    }
+
+    openSettings(armed) {
+      if (this.modal && this.modal.kind === 'settings' && !armed) { this.closeModal(); return; }
+      const api = window.IslandGame, gridOn = this.registry.get('grid') !== false;
+      const mu = this.music, rows = [];
+      if (mu && mu.ok) rows.push(
+        { text: 'DAY MUSIC', sub: mu.track === 'off' ? 'SILENT (COIN SOUNDS STAY ON)' : IslandSongs.SONGS[mu.track].tag, btn: { label: mu.trackName(), tone: mu.track === 'off' ? 'off' : 'ok', fn: () => { mu.unlock(); mu.nextTrack(); this.openSettings(true); } } },
+        { text: 'VOLUME', sub: 'MUSIC AND COIN SOUNDS', btn: { label: mu.volName(), fn: () => { mu.nextVol(); this.openSettings(true); } } },
+        { text: 'COINS ON THE BEAT', sub: 'TAPS LAND ON THE MUSIC\'S BEAT', btn: { label: mu.snap ? 'ON' : 'OFF', tone: mu.snap ? 'ok' : 'off', fn: () => { mu.toggleSnap(); this.openSettings(true); } } },
+      );
+      rows.push(
+        { text: 'MENU SIDE', sub: 'WHICH EDGE THE MENU SITS ON', btn: { label: this.side === 'left' ? 'LEFT' : 'RIGHT', fn: () => { this.closeModal(); api.setSide(this.side === 'left' ? 'right' : 'left'); } } },
+        { text: 'TILE GRID', sub: 'DOTS ON BUILDABLE GRASS', btn: { label: gridOn ? 'ON' : 'OFF', tone: gridOn ? 'ok' : 'off', fn: () => { api.toggleGrid(); this.openSettings(true); } } },
+        { text: 'VIEW', sub: 'PINCH OR WHEEL TO ZOOM, DRAG TO PAN', btn: { label: 'RESET', fn: () => { this.resetView(); this.closeModal(); } } },
+        { text: 'SKIP PHASE', sub: 'FOR TESTING (N)', btn: { label: 'SKIP', fn: () => { this.closeModal(); this.skipPhase(); } } },
+        { text: 'NEW ISLAND', sub: armed === 'wipe' ? 'TAP AGAIN TO WIPE YOUR SAVE' : 'START OVER FROM SCRATCH', subColor: armed === 'wipe' ? '#e43b44' : null,
+          btn: { label: armed === 'wipe' ? 'SURE?' : 'WIPE', tone: 'danger', fn: () => { if (armed === 'wipe') api.newIsland(); else this.openSettings('wipe'); } } },
+      );
+      this.openModal('settings', ['SETTINGS'], 240, rows);
     }
 
     // ------------------------------------------------------------ top bar
     buildUI() {
       const S = this.S, P = S.P, k = this.key;
-      const txt = (x, y, s, color) => new PixelText(this, x, y, s, { color: color || P.text, outline: P.textOutline }).setOrigin(0, 0).setScrollFactor(0).setDepth(3001);
-      const top = this.add.image(0, 0, k('panel-top')).setOrigin(0).setScrollFactor(0).setDepth(3000).setInteractive();
-      top.isUI = true;
+      const txt = (x, y, s, color) => U(new PixelText(this, x, y, s, { color: color || P.text, outline: P.textOutline }).setOrigin(0, 0).setDepth(3001));
+      U(this.add.image(0, 0, k('panel-top')).setOrigin(0).setDepth(3000).setInteractive());
       this.curText = {};
       for (const [c, x] of [['bronze', 3], ['silver', 100], ['gold', 142], ['diamond', 184]]) {
-        this.add.image(x, 2, k('ico-' + c)).setOrigin(0).setScrollFactor(0).setDepth(3001);
+        U(this.add.image(x, 2, k('ico-' + c)).setOrigin(0).setDepth(3001));
         this.curText[c] = txt(x + 11, 3, '0');
       }
       this.rateText = txt(60, 3, '', P.accent);
-      this.phaseIcon = this.add.image(224, 2, k('ico-sun')).setOrigin(0).setScrollFactor(0).setDepth(3001);
+      this.phaseIcon = U(this.add.image(224, 2, k('ico-sun')).setOrigin(0).setDepth(3001));
       this.phaseText = txt(235, 3, '', P.accent);
-      this.phaseBar = this.add.graphics().setScrollFactor(0).setDepth(3002);
+      this.phaseBar = U(this.add.graphics().setDepth(3002));
 
-      this.comboText = new PixelText(this, 160, TOP + 4, 'COMBO x2', { color: P.accent, outline: P.worldOutline, scale: 2 }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(3001).setVisible(false);
-      this.comboBar = this.add.graphics().setScrollFactor(0).setDepth(3001);
+      this.comboText = U(new PixelText(this, UW / 2, TOP + 4, 'COMBO x2', { color: P.accent, outline: P.worldOutline, scale: 2 }).setOrigin(0.5, 0).setDepth(3001).setVisible(false));
+      this.comboBar = U(this.add.graphics().setDepth(3001));
+      this.edgeG = U(this.add.graphics().setDepth(2990));
       this.buildOrderCard();
+      this.buildShip();
+      this.buildItemBar();
+      this.buildFishPanel();
       this.buildDock();
+      this.buildRail();
       this.buildDrawer();
     }
 
@@ -1021,15 +1762,21 @@
       else { label = 'DAWN'; frac = 1; col = 0xead4aa; }
       this.phaseText.setText(label);
       this.phaseIcon.setTexture(this.key(cy.phase === 'day' || cy.phase === 'dawn' ? 'ico-sun' : 'ico-moon'));
-      this.phaseBar.clear().fillStyle(col, 1).fillRect(0, TOP - 1, Math.round(320 * Math.max(0, frac)), 1);
+      this.phaseBar.clear().fillStyle(col, 1).fillRect(0, TOP - 1, Math.round(UW * Math.max(0, frac)), 1);
     }
 
     update(time, dt) {
       const sec = Math.min(dt, 250) / 1000;
       E.tick(this.state, sec, this.eval);
       for (const ev of N.step(this.state, sec, this.S.lanes.length)) this.onCycle(ev);
+      for (const ev of F.step(this.state, sec)) this.onFishing(ev);
+      if (this.music) {
+        const cy = this.state.cycle, f = cy.t / N.DAY_LEN;
+        this.music.follow(cy.phase, f < 0.34 ? 'morning' : f < 0.72 ? 'midday' : 'afternoon');
+      }
 
-      const night = this.state.cycle.phase === 'night';
+      const night = this.state.cycle.phase === 'night', cast = this.state.fishing.cast;
+      const want = cast ? cast.set[cast.pos] : null;
       const blink = Math.floor(time / 90) & 1;
       for (const v of this.views.values()) {
         if (!v.bubble) { if (v.aim) v.aim.setVisible(night && !!N.targetFor(this.state, v.b, this.cov)); continue; }
@@ -1037,27 +1784,34 @@
         v.bubble.setVisible(ready);
         // PERFECT window: the bubble flashes gold right after it fills
         if (ready && E.isRipe(v.b)) v.bubble.setTint(blink ? 0xfee761 : 0xffffff); else v.bubble.clearTint();
-        v.aim.setVisible(ready && night && !!N.targetFor(this.state, v.b, this.cov));
+        // brackets: can fire at a raider now, or makes the coin the hooked fish wants next
+        const reel = !!want && B[v.b.type].cur === want && !(v.b.burn > 0);
+        v.aim.setVisible(reel || (ready && night && !!N.targetFor(this.state, v.b, this.cov)));
       }
       for (const rv of this.raiders.values()) this.syncRaider(rv);
       const w = this.state.wallet;
       for (const c of E.CURRENCIES) this.curText[c].setText(E.fmt(w[c]));
-      this.rateText.setX(this.curText.bronze.x + this.curText.bronze.width + 3).setText('+' + fmtRate(this.rates.bronze || 0) + '/S');
+      this.rateText.setX(this.curText.bronze.x + this.curText.bronze.width + 3).setText('+' + fmtRate((this.rates.bronze || 0) * F.bookBonus(this.state)) + '/S');
       this.refreshPhase();
       this.refreshOrderCard();
+      this.refreshShip();
+      this.refreshItemBar();
+      this.refreshFishPanel(time);
+      this.drawRipple(time);
+      this.drawEdgeMarkers(time);
 
       this.antsG.clear();
       if (this.ants) this.dotPerimeter(this.antsG, this.ants.set, this.ants.col, Math.floor(time / 120));
 
       if (this.comboLeft > 0) {
         this.comboLeft -= dt;
-        if (this.comboLeft <= 0) { this.combo = 0; this.comboText.setVisible(false); }
+        if (this.comboLeft <= 0) { this.combo = 0; this.comboText.setVisible(false); if (this.music) this.music.endStreak(); }
       }
       this.comboBar.clear();
-      if (this.combo >= 2) {
+      if (this.combo >= 2 && !cast) {
         const bw = Math.ceil(40 * this.comboLeft / (E.COMBO_WINDOW * 1000));
-        this.comboBar.fillStyle(0x000000, 0.6).fillRect(139, TOP + 19, 42, 3);
-        this.comboBar.fillStyle(hex(this.S.P.accent), 1).fillRect(140, TOP + 20, bw, 1);
+        this.comboBar.fillStyle(0x000000, 0.6).fillRect(UW / 2 - 21, TOP + 19, 42, 3);
+        this.comboBar.fillStyle(hex(this.S.P.accent), 1).fillRect(UW / 2 - 20, TOP + 20, bw, 1);
       }
 
       if (this.night) {

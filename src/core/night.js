@@ -24,11 +24,13 @@
   const SPREAD_AFTER = 6;      // a fire left alone this long jumps to a touching building (and again every 6s)
   const TOWER_COOLDOWN = 3;    // seconds before a watchtower can answer another shield pip
   const TOWER_PIP_FROM = 3, TOWER_PIP_CHANCE = 0.18, BOSS_EVERY = 5;
+  const NET_SLOW = 0.3;        // a net makes that night's raiders 30% slower
+  const towerCooldown = (b) => Math.max(1, TOWER_COOLDOWN - 0.5 * (G.levelOf(b) - 1)); // upgrades reload faster
   const PHASES = ['day', 'dusk', 'night', 'dawn'];
   // at least 3 raiders a night; more than there are lanes queue up further out to sea
   const raiderCount = (day) => Math.min(8, 3 + Math.floor((day - 1) / 2));
   const seqLength = (day) => Math.min(6, 2 + Math.floor((day - 1) / 2));
-  const approachSecs = (day) => Math.max(25, 55 - day * 2);
+  const approachSecs = (day) => Math.max(25, 50 - day * 2);
   const lootBronze = (day) => new Decimal(15).mul(Decimal.pow(1.35, day)).floor();
   const diamondChance = (day) => Math.min(0.5, 0.15 + 0.02 * day);
 
@@ -103,6 +105,14 @@
 
   const addTo = (bag, cur, amount) => { bag[cur] = (bag[cur] ? new Decimal(bag[cur]) : new Decimal(0)).add(amount); };
 
+  // a fire bucket from the merchant saves the building instead
+  function ignite(state, b) {
+    const it = state.items;
+    if (it && it.bucket > 0) { it.bucket--; return false; }
+    b.burn = BURN_TAPS; b.burnT = 0; b.spreadT = 0;
+    return true;
+  }
+
   function land(state, r, rand) {
     const cy = state.cycle, stolen = {};
     for (const c of ['bronze', 'silver', 'gold']) {
@@ -110,13 +120,13 @@
       if (amt.gt(0)) { state.wallet[c] = state.wallet[c].sub(amt); stolen[c] = amt; addTo(cy.report.stolen, c, amt); }
     }
     const targets = state.buildings.filter((b) => B[b.type].cur && !(b.burn > 0));
-    let fire = null;
+    let fire = null, saved = null;
     if (targets.length) {
       const b = targets[Math.floor(rand() * targets.length)];
-      b.burn = BURN_TAPS; fire = b.id; cy.report.fires++;
+      if (ignite(state, b)) { fire = b.id; cy.report.fires++; } else saved = b.id;
     }
     r.status = 'landed'; cy.report.landed++;
-    return { type: 'land', raider: r.id, stolen, fire };
+    return { type: 'land', raider: r.id, stolen, fire, saved };
   }
 
   // Advance the clock. Returns events for the view: dusk, night, land, dawn, day.
@@ -152,9 +162,10 @@
         const cands = neighbours(state, b).filter((o) => !(o.burn > 0));
         if (cands.length) {
           const t = cands[Math.floor(rng(b.id * 131 + state.buildings.length * 17 + Math.floor((state.cycle ? state.cycle.t : 0) * 10))() * cands.length)];
-          t.burn = BURN_TAPS; t.burnT = 0; t.spreadT = 0;
-          if (report) report.fires++;
-          events.push({ type: 'spread', from: b.id, id: t.id });
+          if (ignite(state, t)) {
+            if (report) report.fires++;
+            events.push({ type: 'spread', from: b.id, id: t.id });
+          } else events.push({ type: 'saved', id: t.id });
         }
       }
     }
@@ -171,6 +182,12 @@
     } else if (cy.phase === 'dusk' && cy.t >= DUSK_LEN) {
       cy.phase = 'night'; cy.t = 0;
       events.push({ type: 'night' });
+      // a fishing net from the merchant slows the whole night's raiders
+      if (state.items && state.items.net > 0) {
+        state.items.net--;
+        for (const r of cy.raiders) r.speed *= 1 - NET_SLOW;
+        events.push({ type: 'net' });
+      }
     } else if (cy.phase === 'night') {
       const rand = rng(cy.day * 104729 + Math.floor(cy.t * 10));
       for (const r of cy.raiders) {
@@ -208,16 +225,11 @@
     return cands[0] || null;
   }
 
-  // Fire a full, covered building at the matching raider. Spends its batch.
-  function fire(state, id, cov) {
-    const b = state.buildings.find((x) => x.id === id);
-    if (!b) return null;
-    const r = targetFor(state, b, cov);
-    if (!r) return null;
+  // Knock the next coin off raider r; sinking it pays loot.
+  function hitRaider(state, r) {
     const cy = state.cycle;
-    if (B[b.type].kind === 'defense') b.cool = TOWER_COOLDOWN; else b.fill = 0;
     r.hit++;
-    const res = { raider: r.id, building: id, sunk: false, loot: null };
+    const res = { raider: r.id, sunk: false, loot: null };
     if (r.hit >= r.seq.length) {
       r.status = 'sunk'; cy.report.sunk++;
       const loot = { bronze: lootBronze(cy.day).mul(r.boss ? 5 : 1) };
@@ -226,6 +238,26 @@
       res.sunk = true; res.loot = loot;
     }
     return res;
+  }
+
+  // Fire a full, covered building at the matching raider. Spends its batch.
+  function fire(state, id, cov) {
+    const b = state.buildings.find((x) => x.id === id);
+    if (!b) return null;
+    const r = targetFor(state, b, cov);
+    if (!r) return null;
+    if (B[b.type].kind === 'defense') b.cool = towerCooldown(b); else b.fill = 0;
+    return { ...hitRaider(state, r), building: id };
+  }
+
+  // Fire a cannonball (merchant item) at the raider closest to shore.
+  function cannon(state) {
+    const cy = ensure(state), it = state.items;
+    if (cy.phase !== 'night' || !it || !(it.cannon > 0)) return null;
+    const r = cy.raiders.filter((x) => x.status === 'coming').sort((x, y) => y.progress - x.progress)[0];
+    if (!r) return null;
+    it.cannon--;
+    return hitRaider(state, r);
   }
 
   // One tap of water on a burning building. Returns taps still needed, or null.
@@ -266,7 +298,7 @@
   }
 
   const api = {
-    DAY_LEN, DUSK_LEN, DAWN_LEN, BURN_TAPS, BURN_DRAIN, SPREAD_AFTER, TOWER_COOLDOWN, BOSS_EVERY, STEAL, burn, neighbours, raiderCount, seqLength, approachSecs,
+    DAY_LEN, DUSK_LEN, DAWN_LEN, BURN_TAPS, BURN_DRAIN, SPREAD_AFTER, TOWER_COOLDOWN, BOSS_EVERY, NET_SLOW, STEAL, burn, neighbours, towerCooldown, cannon, hitRaider, raiderCount, seqLength, approachSecs,
     newCycle, ensure, coverage, isCovered, producible, planNight, step, skip, targetFor, fire, douse, restore,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -1,8 +1,10 @@
-// main.js — boots Phaser at a fixed 320x180 internal resolution and scales it
-// up by whole numbers only (nearest-neighbour), plus the page controls.
+// main.js — boots Phaser at a fixed 640x360 internal resolution and scales the
+// canvas by whole numbers only (nearest-neighbour), plus the page controls.
+// Inside, the UI is drawn at 2x (a 320x180 layout) and the world camera zooms
+// smoothly, so zooming out can show far more sea than before.
 (function () {
   'use strict';
-  const W = 320, H = 180;
+  const W = 640, H = 360;
 
   const store = {
     get(k, d) { try { const v = localStorage.getItem('itc-' + k); return v == null ? d : v; } catch (e) { return d; } },
@@ -40,6 +42,13 @@
 
   const api = window.IslandGame = {
     skipPhase() { scene().skipPhase(); },
+    newIsland() {
+      try { localStorage.removeItem('itc-save-v1'); } catch (e) { /* ignore */ }
+      game.registry.set('fresh', true);
+      scene().scene.restart();
+      document.body.classList.remove('menu-open');
+    },
+    get side() { return state.side; },
     setSide(side) {
       state.side = side; store.set('side', side);
       game.registry.set('drawerSide', side);
@@ -61,7 +70,7 @@
   };
 
   const zb = document.getElementById('zoomBtns');
-  for (const z of ['auto', '1', '2', '3', '4', '5']) {
+  for (const z of ['auto', '1', '2', '3']) {
     const b = document.createElement('button');
     b.textContent = z === 'auto' ? 'Auto' : z + '×'; b.dataset.z = z;
     b.setAttribute('aria-pressed', z === state.zoom);
@@ -84,10 +93,7 @@
       return;
     }
     clearTimeout(armed); armed = null; delete reset.dataset.armed; reset.textContent = 'New island';
-    try { localStorage.removeItem('itc-save-v1'); } catch (e) { /* ignore */ }
-    game.registry.set('fresh', true);
-    scene().scene.restart();
-    document.body.classList.remove('menu-open');
+    api.newIsland();
   };
 
   const full = document.getElementById('fullBtn');

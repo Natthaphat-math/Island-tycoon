@@ -83,7 +83,7 @@
     <button id="sideBtn">Menu: left</button>
     <button id="fullBtn" hidden>Fullscreen</button>
   </div>
-  <div class="group" id="zoomBtns"><span>Zoom</span></div>
+  <div class="group" id="zoomBtns"><span>Pixel size</span></div>
   <div class="group"><button id="skipBtn" title="Jump to the next phase (for testing)">Skip phase ⏭</button>
     <button id="resetBtn" class="danger">New island</button></div>
 </header>
@@ -99,12 +99,14 @@
         <li>Buildings fill up, then show a coin. Tap to collect. Full buildings wait for you, and nothing is earned while you're away.</li>
         <li><b>Perfect:</b> the coin flashes gold for 1.5s right after it fills. Tap then for ×1.5.</li>
         <li>Tap full buildings quickly one after another for a streak: +10% per step, up to ×3.</li>
+        <li><b>Merchant ship</b>: once a day it docks by the pier for 30s. Tap it to buy night tools: a fire bucket (saves the next fire), a net (that night's raiders are 30% slower) or a cannonball (fire it from the night toolbar to knock a coin off the closest raider). It also swaps bronze for silver or silver for gold.</li>
+        <li><b>Music</b> starts with your first tap. The day song builds from a light morning to a full midday band, then winds down in the afternoon, and fades out at dusk. Coin taps are tuned to it and land on its beat; a fast streak climbs the scale and brings in extra drums. Pick one of three songs (or none) in Settings.</li>
         <li><b>Orders</b> (top corner): small goals like "TAP HUT x4" or "3 PERFECT TAPS" pay bonus bronze. A new one arrives after each.</li>
       </ul>
     </div>
     <div><b>Dusk &amp; night</b>
       <ul>
-        <li>At dusk, raiders appear offshore with a row of coins: the currencies you must hit them with, in order.</li>
+        <li>At dusk, raiders appear far out at sea with a row of coins: the currencies you must hit them with, in order.</li>
         <li>At night, tap a <em>full</em> building inside a watchtower's dotted coverage to fire its batch. It hits the raider whose next coin matches that building's currency. Red brackets mark buildings that can fire right now.</li>
         <li>At least 3 raiders come every night. When there are more raiders than sea lanes, the extras wait further out and come in later.</li>
         <li><b>Shield coins</b> (from day 3): tap a watchtower itself. It then needs 3s to reload.</li>
@@ -113,12 +115,22 @@
         <li><b>Fire:</b> tap a burning building 10 times to put it out. Until then it earns nothing and burns 1% of your bronze every second (the red numbers). After 6s it <b>spreads</b> to a touching building, then again every 6s.</li>
       </ul>
     </div>
+    <div><b>Fishing</b>
+      <ul>
+        <li>By day, ripples appear on the water next to the shore. Tap one to cast.</li>
+        <li>The fish shows a set of coins. Tap buildings that make those coins, in order (red brackets mark the right ones). Each tap must come within 2s of the last, or the set starts over.</li>
+        <li>The green gauge drains all the time. Correct taps and finished sets fill it; fill it to land the fish (always at least 2 sets). If it empties, the fish gets away.</li>
+        <li>Rarer fish ask for rarer coins, sometimes ones your island can't make yet. They sell for more in the <b>fish book</b> (the book button), and every new kind you catch adds +5% to all income for good.</li>
+      </ul>
+    </div>
     <div><b>Build &amp; edit</b>
       <ul>
-        <li>Build: pick a card in the drawer (or press <kbd>1</kbd>–<kbd>8</kbd>), position it, then click, press ✓, or tap the same tile again. Rotate with <kbd>R</kbd>, the wheel or the ↻ button.</li>
-        <li><b>Edit mode</b> (the drawer's EDIT button or <kbd>E</kbd>): tap a building to pick it up, then drop it elsewhere, rotate it, or SELL it (asks twice). Outside edit mode, taps never move or sell anything.</li>
-        <li>Info and buttons always sit in the panel at the bottom corner opposite the drawer, never on top of buildings. Hover a building (or tap one that isn't full) to see its numbers there.</li>
-        <li><kbd>Tab</kbd> or « / » hides the drawer. "Menu" in the header moves it to the other side.</li>
+        <li>The menu rail holds <b>Build</b>, <b>Edit</b>, the fish book and settings.</li>
+        <li>Build: pick a card (or press <kbd>1</kbd>–<kbd>8</kbd>), position it, then click, press ✓, or tap the same tile again. Rotate with <kbd>R</kbd>, the wheel or the ↻ button.</li>
+        <li><b>Land</b> is the last tab of the build menu: dotted tiles next to the island can be bought. Sea becomes sand and sand becomes grass. Each tile costs more than the last.</li>
+        <li><b>Edit:</b> hold a building (or use the Edit button, <kbd>E</kbd>) and drag it somewhere else. Let go on a bad spot and it snaps back. It stays selected, so you can turn it, <b>upgrade</b> it with silver (up to level 5: ×2 output per level; markets boost harder; towers reload faster and guard wider from level 3) or sell it (asks twice; refunds half, including upgrade silver). Tap empty space to finish.</li>
+        <li>Mouse: right-click a building to pick it up, then left-click to drop it.</li>
+        <li><b>View:</b> pinch or use the mouse wheel to zoom (it settles on a crisp pixel size), drag empty ground to pan. Zoom out to see raiders coming from far away; off-screen raiders show as red markers on the edge.</li>
       </ul>
     </div>
     <div><b>Aura rules</b> (placeholder numbers)
@@ -133,10 +145,15 @@
 <script src="src/core/economy.js"></script>
 <script src="src/core/night.js"></script>
 <script src="src/core/orders.js"></script>
+<script src="src/core/merchant.js"></script>
+<script src="src/core/fishing.js"></script>
 <script src="src/pixel.js"></script>
 <script src="src/common-art.js"></script>
 <script src="src/styles/square-terrain.js"></script>
 <script src="src/styles/sunlit.js"></script>
+<script src="src/audio/songs.js"></script>
+<script src="src/audio/music.js"></script>
+<script src="src/audio/soundtrack.js"></script>
 <script src="src/scene.js"></script>
 <script src="src/main.js"></script>
 </body>

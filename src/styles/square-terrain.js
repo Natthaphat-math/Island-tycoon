@@ -18,7 +18,10 @@
 
   // C = colours, o = options { frames, foam:[..per frame], shallowAt, tuftDensity }
   function render(scene, key, S, C, o = {}) {
-    const W = 320, H = 180, { T, ox, oy } = S.grid, frames = o.frames || 4;
+    // o.bounds: world rectangle to cover (defaults to the 320x180 screen); the map's
+    // tiles keep their world positions, everything outside the map is open sea
+    const bd = o.bounds || { x0: 0, y0: 0, w: 320, h: 180 };
+    const W = bd.w, H = bd.h, T = S.grid.T, ox = S.grid.ox - bd.x0, oy = S.grid.oy - bd.y0, frames = o.frames || 4;
     const land = field(S.map, T, ox, oy, (ch) => ch === 's' || ch === 'g');
     const grass = field(S.map, T, ox, oy, (ch) => ch === 'g');
     const WATER = 0, SAND = 1, GRASS = 2;
@@ -94,7 +97,8 @@
     if (!scene.anims.exists(key)) {
       scene.anims.create({ key, frames: [0, 1, 2, 3, 2, 1].map((f) => ({ key, frame: f })), frameRate: 3, repeat: -1 });
     }
-    return scene.add.sprite(0, 0, key, 0).setOrigin(0).setDepth(0).play(key);
+    const bd = (o && o.bounds) || { x0: 0, y0: 0 };
+    return scene.add.sprite(bd.x0, bd.y0, key, 0).setOrigin(0).setDepth(0).play(key);
   }
 
   // Dotted tile grid over buildable (grass) tiles, with a small cross at corners.

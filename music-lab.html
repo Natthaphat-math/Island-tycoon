@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Day Theme Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+  /* one look on purpose: the game's own night-sea palette */
+  :root {
+    color-scheme: dark;
+    --ground: #10141f; --panel: #181e2e; --panel-2: #20283d; --line: #2a3350;
+    --text: #e6e9f2; --dim: #8e97b3; --sun: #feae34; --sea: #2ce8f5;
+    --bronze: #e4a672; --silver: #c0cbdc; --gold: #fee761; --leaf: #63c74d;
+    --display: 'Pixelify Sans', ui-monospace, monospace;
+    --body: 'IBM Plex Sans', system-ui, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--ground); color: var(--text); }
+  body { margin: 0; font: 15px/1.5 var(--body); padding-inline: 16px; padding-block: 20px 40px; }
+  main { max-width: 860px; margin: 0 auto; display: grid; gap: 22px; }
+  h1, h2 { font-family: var(--display); font-weight: 700; margin: 0; text-wrap: balance; letter-spacing: .02em; }
+  h1 { font-size: clamp(26px, 5vw, 36px); color: var(--sun); line-height: 1.1; }
+  h2 { font-size: 17px; color: var(--text); }
+  .lede { color: var(--dim); margin: 6px 0 0; max-width: 62ch; }
+  .label { font: 600 11px/1 var(--body); letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+  section { background: var(--panel); border: 1px solid var(--line); padding: 16px; display: grid; gap: 14px; }
+  button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); cursor: pointer;
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  button:focus-visible { outline: 2px solid var(--sea); outline-offset: 2px; }
+
+  /* versions */
+  .versions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .version { text-align: left; padding: 12px; display: grid; gap: 4px; align-content: start; }
+  .version b { font: 700 16px/1.2 var(--display); }
+  .version small { color: var(--dim); font-size: 13px; line-height: 1.4; }
+  .version .tag { font: 500 12px var(--mono); color: var(--dim); }
+  .version[aria-pressed="true"] { border-color: var(--sun); box-shadow: inset 0 0 0 1px var(--sun); background: #2a2a2e; }
+  .version[aria-pressed="true"] b { color: var(--sun); }
+
+  /* transport */
+  .transport { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; }
+  #play { font: 700 18px var(--display); padding: 10px 22px; background: var(--sun); color: #1a1420; border-color: var(--sun); min-width: 120px; }
+  #play[aria-pressed="true"] { background: var(--panel-2); color: var(--sun); }
+  .readout { font: 500 14px var(--mono); color: var(--dim); display: flex; gap: 16px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+  .readout b { color: var(--text); font-weight: 500; }
+  .vol { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .vol input { width: 110px; accent-color: var(--sun); }
+
+  /* chord strip */
+  .strip-wrap { overflow-x: auto; }
+  .strip { display: grid; grid-template-columns: repeat(16, minmax(38px, 1fr)); gap: 3px; min-width: 620px; }
+  .bar { position: relative; background: var(--panel-2); border: 1px solid var(--line); padding: 6px 4px 8px; text-align: center; font: 500 12px var(--mono); color: var(--dim); }
+  .bar .n { display: block; font-size: 10px; opacity: .6; }
+  .bar.b { background: #232235; }
+  .bar.on { color: var(--text); border-color: var(--sun); }
+  .bar i { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--sun); width: 0; }
+  .sections { display: flex; justify-content: space-between; font: 500 11px var(--mono); color: var(--dim); min-width: 620px; }
+
+  /* time of day */
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .seg button { padding: 8px 14px; }
+  .seg button[aria-pressed="true"] { background: var(--sun); color: #1a1420; border-color: var(--sun); }
+  .sky { position: relative; height: 34px; border: 1px solid var(--line);
+    background: linear-gradient(90deg, #3a4466 0%, #4b7fc0 22%, #2ce8f5 36%, #2ce8f5 66%, #f77622 88%, #6b2d4e 100%); }
+  .sky .zone { position: absolute; top: 0; bottom: 0; border-right: 1px dashed rgba(16,20,31,.6); font: 600 11px var(--body); letter-spacing: .1em;
+    text-transform: uppercase; color: #10141f; padding: 9px 8px; white-space: nowrap; overflow: hidden; }
+  .sky .sunpip { position: absolute; top: 5px; width: 22px; height: 22px; margin-left: -11px; background: var(--gold); border: 3px solid #10141f; left: 0; transition: left .2s linear; }
+  .sky .sunpip[hidden] { display: none; }
+  .hint { color: var(--dim); font-size: 13px; margin: 0; }
+
+  /* coin pads */
+  .pads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .pad { padding: 18px 8px; display: grid; gap: 6px; justify-items: center; user-select: none; -webkit-user-select: none; }
+  .pad .coin { width: 34px; height: 34px; border: 3px solid #10141f; box-shadow: 0 0 0 2px currentColor; }
+  .pad b { font: 700 16px var(--display); }
+  .pad small { color: var(--dim); font-size: 12px; }
+  .pad.bronze { color: var(--bronze); } .pad.silver { color: var(--silver); } .pad.gold { color: var(--gold); }
+  .pad.bronze .coin { background: var(--bronze); } .pad.silver .coin { background: var(--silver); } .pad.gold .coin { background: var(--gold); }
+  .pad b, .pad small { color: var(--text); }
+  .pad.hit { transform: translateY(2px); background: #2b3450; }
+  .options { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; }
+  .options .group { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  .toggle input { width: 18px; height: 18px; accent-color: var(--sun); }
+  .streak { font: 700 22px var(--display); color: var(--sun); font-variant-numeric: tabular-nums; min-width: 9ch; }
+  .streak small { font: 500 12px var(--mono); color: var(--dim); display: block; }
+  .log { font: 500 12px var(--mono); color: var(--dim); min-height: 1.5em; }
+
+  .notes ul { margin: 0; padding-left: 18px; color: var(--dim); display: grid; gap: 4px; }
+  .notes b { color: var(--text); font-weight: 600; }
+  kbd { font: 500 12px var(--mono); border: 1px solid var(--line); padding: 0 5px; background: var(--panel-2); }
+
+  @media (max-width: 620px) {
+    .versions { grid-template-columns: 1fr; }
+    .vol { margin-left: 0; }
+    .pad { padding: 16px 4px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .sky .sunpip { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Day Theme Lab</h1>
+    <p class="lede">Three takes on the island's daytime music. They share one tune and chord progression, so you're comparing sound and groove. Play one, switch the time of day, and tap the coin pads along with it.</p>
+  </header>
+
+  <section aria-labelledby="h-version">
+    <h2 id="h-version">Version</h2>
+    <div class="versions" id="versions"></div>
+    <div class="transport">
+      <button id="play" aria-pressed="false">▶ Play</button>
+      <div class="readout" aria-live="off">
+        <span>bar <b id="r-bar">–</b>/16</span>
+        <span>chord <b id="r-chord">–</b></span>
+        <span><b id="r-bpm">–</b> bpm</span>
+      </div>
+      <label class="vol"><span class="label">Volume</span><input id="vol" type="range" min="0" max="1" step="0.05" value="0.7"></label>
+    </div>
+    <div class="strip-wrap">
+      <div class="sections"><span>A · the hook</span><span>A′ · answer</span><span>B · climb</span><span>turnaround ↺</span></div>
+      <div class="strip" id="strip"></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-day">
+    <h2 id="h-day">Time of day</h2>
+    <div class="seg" id="parts">
+      <button data-part="morning">Morning</button>
+      <button data-part="midday" aria-pressed="true">Midday</button>
+      <button data-part="afternoon">Afternoon</button>
+      <button data-part="auto">Auto: a 90s day</button>
+    </div>
+    <div class="sky" aria-hidden="true">
+      <span class="zone" style="left:0;width:33.3%">morning</span>
+      <span class="zone" style="left:33.3%;width:38.9%">midday</span>
+      <span class="zone" style="left:72.2%;width:27.8%;border-right:0">afternoon</span>
+      <span class="sunpip" id="sun" hidden></span>
+    </div>
+    <p class="hint">Morning is sparse: marimba or soft lead, light shaker, no kick. Midday brings in the full band. Afternoon drops some drums and gets warmer and softer, heading into dusk. Layers fade over a couple of seconds instead of cutting.</p>
+  </section>
+
+  <section aria-labelledby="h-coins">
+    <h2 id="h-coins">Tap along</h2>
+    <div class="pads">
+      <button class="pad bronze" data-cur="bronze"><span class="coin"></span><b>Fisher hut</b><small>bronze · <kbd>J</kbd></small></button>
+      <button class="pad silver" data-cur="silver"><span class="coin"></span><b>Workshop</b><small>silver · <kbd>K</kbd></small></button>
+      <button class="pad gold" data-cur="gold"><span class="coin"></span><b>Cursed idol</b><small>gold · <kbd>L</kbd></small></button>
+    </div>
+    <div class="options">
+      <div class="streak" id="streak">–<small>streak</small></div>
+      <label class="toggle"><input type="checkbox" id="tuned" checked> In tune with the song</label>
+      <label class="toggle"><input type="checkbox" id="perfect"> Perfect taps (sparkle)</label>
+      <div class="group"><span class="label">Snap to beat</span>
+        <div class="seg" id="quant">
+          <button data-q="0">Off</button>
+          <button data-q="16" aria-pressed="true">16th</button>
+          <button data-q="8">8th</button>
+        </div>
+      </div>
+    </div>
+    <div class="log" id="log">Taps within 2.6s of each other make a streak. Each step climbs the scale, and from 3 in a row an extra percussion layer joins in.</div>
+  </section>
+
+  <section class="notes" aria-labelledby="h-notes">
+    <h2 id="h-notes">What to listen for</h2>
+    <ul>
+      <li><b>After a few loops:</b> does it still feel good, or start to nag? You'll hear the day music for hours.</li>
+      <li><b>Energy:</b> upbeat enough to keep you tapping, without competing with the game?</li>
+      <li><b>Coins:</b> do tuned, beat-snapped taps feel like playing along? Turn tuning and snapping off to compare. The 16th snap adds up to about 0.13s of delay.</li>
+      <li><b>Phone speakers:</b> try it on your phone too. Bass mostly disappears there, so the tune and marimba carry it.</li>
+    </ul>
+  </section>
+</main>
+
+<script src="src/audio/songs.js"></script>
+<script src="src/audio/music.js"></script>
+<script>
+(function () {
+  'use strict';
+  const Songs = window.IslandSongs, eng = new IslandMusic.Engine(Songs);
+  const $ = (id) => document.getElementById(id);
+  const store = { get(k, d) { try { return localStorage.getItem('itc-lab-' + k) || d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem('itc-lab-' + k, v); } catch (e) { /* ignore */ } } };
+  let songId = Songs.SONGS[store.get('song')] ? store.get('song') : 'sunlit';
+  let partMode = 'midday', autoT0 = 0;
+
+  // version cards
+  const vbox = $('versions');
+  for (const [id, s] of Object.entries(Songs.SONGS)) {
+    const b = document.createElement('button');
+    b.className = 'version'; b.dataset.id = id;
+    const letter = { sunlit: 'A', pocket: 'B', tidal: 'Mix' }[id];
+    b.innerHTML = `<span class="tag">${letter} · ${s.bpm} bpm${s.swing ? ' · swing' : ''}</span><b></b><small></small>`;
+    b.querySelector('b').textContent = s.name;
+    b.querySelector('small').textContent = s.blurb;
+    b.onclick = () => pickSong(id);
+    vbox.appendChild(b);
+  }
+  function pickSong(id) {
+    songId = id; store.set('song', id);
+    eng.setSong(id);
+    for (const b of vbox.children) b.setAttribute('aria-pressed', b.dataset.id === id);
+    $('r-bpm').textContent = Songs.SONGS[id].bpm;
+  }
+  pickSong(songId);
+
+  // chord strip: one cell per bar, split bars show both chords
+  const strip = $('strip'), cells = [];
+  const toD = (name) => { const map = { C: 'D', D: 'E', E: 'F#', F: 'G', G: 'A', A: 'B', B: 'C#' }; return map[name[0]] + name.slice(1); };
+  for (let bar = 0; bar < 16; bar++) {
+    const a = Songs.CHORDS[bar * 2].name, b = Songs.CHORDS[bar * 2 + 1].name;
+    const c = document.createElement('div');
+    c.className = 'bar' + (bar >= 8 ? ' b' : '');
+    c.innerHTML = `<span class="n">${bar + 1}</span>${a === b ? toD(a) : toD(a) + ' ' + toD(b)}<i></i>`;
+    strip.appendChild(c); cells.push(c);
+  }
+
+  // transport
+  $('play').onclick = () => {
+    if (eng.playing) { eng.stop(); }
+    else { eng.setSong(songId); eng.play(); if (partMode === 'auto') autoT0 = performance.now(); }
+    $('play').setAttribute('aria-pressed', eng.playing);
+    $('play').textContent = eng.playing ? '■ Stop' : '▶ Play';
+  };
+  $('vol').oninput = (e) => { eng.unlock(); eng.setVolume(+e.target.value); };
+
+  // time of day
+  const partOf = (sec) => (sec < 30 ? 'morning' : sec < 65 ? 'midday' : 'afternoon');
+  for (const b of $('parts').children) b.onclick = () => {
+    partMode = b.dataset.part;
+    for (const x of $('parts').children) x.setAttribute('aria-pressed', x === b);
+    $('sun').hidden = partMode !== 'auto';
+    if (partMode === 'auto') { autoT0 = performance.now(); eng.setPart('morning'); }
+    else eng.setPart(partMode);
+  };
+
+  // coin pads + streak
+  let streak = 0, lastTap = 0;
+  function tap(cur, el) {
+    const now = performance.now();
+    streak = now - lastTap < 2600 ? streak + 1 : 1;
+    lastTap = now;
+    eng.setStreak(streak);
+    const r = eng.coin(cur, { streak, perfect: $('perfect').checked });
+    $('streak').innerHTML = (streak > 1 ? 'x' + streak : '1') + '<small>streak</small>';
+    const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    $('log').textContent = `${cur} coin · note ${names[r.note % 12]}${Math.floor(r.note / 12) - 1}` + (eng.playing ? ` · on chord ${toD(r.chord)} · landed ${Math.round(r.delay * 1000)} ms after the tap` : ' · press Play to hear it with the song');
+    if (el) { el.classList.add('hit'); setTimeout(() => el.classList.remove('hit'), 90); }
+  }
+  for (const b of document.querySelectorAll('.pad')) b.addEventListener('pointerdown', (e) => { e.preventDefault(); tap(b.dataset.cur, b); });
+  const keys = { j: 'bronze', k: 'silver', l: 'gold' };
+  document.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    const cur = keys[e.key.toLowerCase()];
+    if (cur) tap(cur, document.querySelector('.pad.' + cur));
+    if (e.key === ' ' && e.target === document.body) { e.preventDefault(); $('play').click(); }
+  });
+  $('tuned').onchange = (e) => { eng.tuned = e.target.checked; };
+  for (const b of $('quant').children) b.onclick = () => {
+    eng.quantize = +b.dataset.q;
+    for (const x of $('quant').children) x.setAttribute('aria-pressed', x === b);
+  };
+
+  // UI clock
+  let lastBar = -1;
+  function frame() {
+    const pos = eng.position();
+    if (pos) {
+      if (pos.bar !== lastBar) { cells.forEach((c, i) => c.classList.toggle('on', i === pos.bar)); if (lastBar >= 0) cells[lastBar].querySelector('i').style.width = '0'; lastBar = pos.bar; }
+      cells[pos.bar].querySelector('i').style.width = ((pos.step + 1) / 16 * 100) + '%';
+      $('r-bar').textContent = pos.bar + 1; $('r-chord').textContent = toD(pos.chord);
+    } else if (lastBar >= 0) { cells[lastBar].classList.remove('on'); cells[lastBar].querySelector('i').style.width = '0'; lastBar = -1; $('r-bar').textContent = '–'; $('r-chord').textContent = '–'; }
+    if (partMode === 'auto' && eng.playing) {
+      const sec = ((performance.now() - autoT0) / 1000) % 90;
+      $('sun').style.left = (sec / 90 * 100) + '%';
+      const p = partOf(sec);
+      if (p !== eng.part) eng.setPart(p);
+    }
+    if (streak && performance.now() - lastTap > 2600) { streak = 0; eng.setStreak(0); $('streak').innerHTML = '–<small>streak</small>'; }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  window.lab = eng;
+})();
+</script>
+</body>
+</html>

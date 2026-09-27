@@ -243,6 +243,43 @@
     });
     shaped(s, 'plantation', 0, 0, (p, cells) => { field(p, cells, sapling); });
 
+    // merchant ship (docks by the pier during the day)
+    tex(s, 'sunlit-ship', 34, 32, (p) => {
+      p.shadow(17, 29, 15, 2.5, E.black, 60);
+      p.poly([[2, 21], [32, 21], [28, 28], [6, 28]], E.brown1);
+      p.hline(3, 31, 21, E.sand2); p.hline(6, 28, 27, E.brown2); p.hline(5, 29, 24, E.brown2);
+      for (const x of [9, 16, 23]) p.rect(x, 22, 2, 2, E.dark1);
+      p.vline(17, 3, 20, E.brown2); p.vline(10, 8, 20, E.brown2);
+      p.poly([[18, 4], [29, 18], [18, 18]], E.white); p.poly([[18, 4], [23, 11], [18, 11]], E.grey1);
+      p.poly([[11, 8], [16, 18], [11, 18]], E.sand1);
+      p.hline(18, 28, 13, E.red3);
+      p.rect(17, 1, 5, 3, E.yellow1); p.set(17, 0, E.brown2);
+    }, { outline: E.dark1, hl: HL });
+    // night tool icons (9x9) and the upgrade level pip
+    const it9 = (key, rows, map) => tex(s, key, 11, 11, (p) => p.sprite(1, 1, rows, map), { outline: E.dark1 });
+    it9('sunlit-item-bucket', ['.#######.', '.#bbbbb#.', '.#bcbbb#.', '.#bbbbb#.', '..#bbb#..', '..#####..', '.........', '.........', '.........'].slice(0, 7), { '#': E.grey2, b: E.blue2, c: E.cyan });
+    it9('sunlit-item-net', ['#.#.#.#', '.#.#.#.', '#.#.#.#', '.#.#.#.', '#.#.#.#', '.#.#.#.', '#.#.#.#'], { '#': E.sand2 });
+    it9('sunlit-item-cannon', ['..###..', '.#####.', '##w####', '#######', '#######', '.#####.', '..###..'], { '#': E.grey4, w: E.grey1 });
+    tex(s, 'sunlit-level', 5, 5, (p) => { p.set(2, 1, E.yellow2); p.hline(1, 3, 2, E.yellow1); p.set(2, 3, E.orange2); }, { outline: E.dark1 });
+
+    // fish (for the fish book and catches)
+    const fish = (id, body, belly, fin, eye) => tex(s, 'sunlit-fish-' + id, 16, 10, (p) => {
+      p.ellipse(7, 5, 5.5, 3, body); p.hline(3, 11, 6, belly); p.hline(4, 10, 7, belly);
+      p.poly([[11, 5], [15, 1], [15, 9]], fin); p.set(8, 2, fin); p.set(7, 2, fin);
+      p.set(4, 4, eye); p.set(3, 4, E.white);
+    }, { outline: E.dark1 });
+    fish('sardine', E.grey2, E.grey1, E.grey3, E.dark1);
+    fish('snapper', E.red3, E.pink2, E.red1, E.dark1);
+    fish('tuna', E.blue1, E.blue2, E.navy, E.white);
+    fish('pearlfish', E.cyan, E.white, E.purple2, E.purple1);
+    tex(s, 'sunlit-bobber', 7, 9, (p) => { p.rect(2, 1, 3, 3, E.red3); p.rect(2, 4, 3, 2, E.white); p.set(3, 0, E.dark1); p.hline(1, 5, 6, E.blue2, 150); }, { outline: E.dark1 });
+    // menu rail icons (13x13)
+    const ic = (key, rows, map) => tex(s, key, rows[0].length + 2, rows.length + 2, (p) => p.sprite(1, 1, rows, map), { outline: E.dark1 });
+    ic('sunlit-ico-build', ['.####.....', '######....', '.####.....', '...##.....', '...##.....', '...##.....', '...##.....', '...##.....', '...##.....', '...##.....'], { '#': E.sand1 });
+    ic('sunlit-ico-book', ['#########.', '#ssss#sss#', '#s..s#s.s#', '#ssss#sss#', '#s..s#s.s#', '#ssss#sss#', '#ssss#sss#', '#########.'], { '#': E.brown2, s: E.sand1, '.': E.sand2 });
+    ic('sunlit-ico-gear', ['...##...', '.######.', '.##..##.', '##....##', '##....##', '.##..##.', '.######.', '...##...'], { '#': E.grey1 });
+    ic('sunlit-cat-land', ['gggggg', 'gggggg', 'ssssss', 'ssssss', 'bbbbbb'], { g: E.green1, s: E.sand1, b: E.blue2 });
+
     // toolbar tool icons (12x12)
     const icon = (key, rows) => tex(s, key, 14, 14, (p) => p.sprite(1, 1, rows, { '#': E.sand1, 'o': E.yellow1, 'r': E.red3 }), { outline: E.dark1 });
     icon('sunlit-tool-rotate', [
@@ -377,20 +414,23 @@
       { tex: 'sunlit-dock', c: 17, r: 7, flat: true }, { tex: 'sunlit-dock', c: 18, r: 7, flat: true },
       { tex: 'sunlit-boat', c: 19, r: 7, dy: -2, flat: true },
     ],
-    // raider lanes: dusk staging point (s) -> landing spot just off the beach (t)
+    // the whole world the camera can see (the 20x12 map sits in the middle of open sea)
+    world: { x0: -160, y0: -110, w: 640, h: 400 },
+    // raider lanes: dusk staging point far out at sea (s) -> landing spot just off the beach (t)
     lanes: [
-      { sx: 34, sy: 20, tx: 44, ty: 32 }, { sx: 292, sy: 22, tx: 268, ty: 32 },
-      { sx: 22, sy: 174, tx: 52, ty: 162 }, { sx: 300, sy: 172, tx: 266, ty: 160 },
+      { sx: -96, sy: -40, tx: 44, ty: 32 }, { sx: 416, sy: -40, tx: 268, ty: 32 },
+      { sx: -96, sy: 222, tx: 52, ty: 162 }, { sx: 416, sy: 222, tx: 266, ty: 160 },
     ],
     textures,
-    terrain(scene) {
-      SquareTerrain.addTerrain(scene, 'sunlit-terrain', S, {
+    // map = the island's current tiles (land can be bought), key = texture name for this layout
+    terrain(scene, map, key) {
+      return SquareTerrain.addTerrain(scene, key || 'sunlit-terrain', { ...S, map: map || S.map }, {
         deep: E.blue1, glint: E.blue2, shallow: E.blue2, ring: E.cyan, foam: E.white,
         sand: E.sand1, sandSpeck: E.sand2, wet: E.sand2, cliff: E.brown1, cliffShadow: E.sand2,
         grass: E.green1, grassDark: E.green2, lip: E.green2, flowers: [E.yellow2, E.white, E.pink2],
-      });
+      }, { bounds: S.world });
     },
-    gridOverlay: (scene) => SquareTerrain.gridOverlay(scene, 'sunlit-grid', S, E.green2, 150),
+    gridOverlay: (scene, map, key) => SquareTerrain.gridOverlay(scene, key || 'sunlit-grid', { ...S, map: map || S.map }, E.green2, 150),
   };
   (window.STYLES = window.STYLES || {}).sunlit = S;
 })();

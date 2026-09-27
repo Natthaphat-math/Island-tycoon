@@ -12,6 +12,32 @@ git history (commit `f627912`).
   auto-collect and no offline income. Tapping within 1.5s of filling is **PERFECT** (×1.5;
   the coin flashes gold). Fast tap streaks give +10% per step, up to ×3. Costs grow ×1.15
   per copy. All money is `break_eternity.js` Decimals.
+- **Money sinks:**
+  - **Upgrades** (per building, silver, levels 1–5; the price triples per level): income
+    buildings get ×2 output per level. Markets add +0.25 to their boost per level.
+    Watchtowers reload faster and guard one tile wider from level 3. Selling refunds half
+    of the upgrade silver too.
+  - **Land** (build menu, LAND tab): buy dotted tiles next to the island, one at a time
+    (sea → sand, sand → grass). The price grows ×1.35 per tile, and the terrain is
+    re-rendered and saved.
+  - **Merchant ship** (`src/core/merchant.js`): docks once a day for 30s. It sells a fire
+    bucket (saves the next fire), a net (that night's raiders are 30% slower) and cannonballs
+    (fired from the night toolbar at the closest raider), plus currency swaps: bronze →
+    silver or silver → gold.
+- **Fishing** (`src/core/fishing.js`): by day a ripple appears on the water by the shore.
+  Tap it and a fish bites (sardine, snapper, tuna or pearlfish, weighted by rarity). It shows
+  a set of coins; tap buildings that make them, in order, each within 2s of the last or the
+  set restarts. A gauge drains all the time; correct taps and finished sets fill it, and a
+  full gauge lands the fish (never before 2 sets). Rarer fish want rarer coins, even ones
+  the island can't make yet. Caught fish go to the hold (sell them in the fish book) and the
+  book itself: every species ever caught adds +5% to all income, for good.
+- **Music** (`src/audio/`): a small Web Audio synth and step sequencer. There are no audio
+  files; songs are note data. The day theme comes in three arrangements, picked in
+  Settings: Sunlit Marimba, Pocket Breeze (chiptune) and Tidal Pixels (a mix of the two).
+  Layers follow the clock (sparse morning, full midday, warmer afternoon) and fade out at
+  dusk; dusk and night tracks come later. Coin taps are tuned to the current chord, climb
+  the pentatonic scale during a streak, snap to the beat (optional), and a 3+ streak
+  brings in an extra percussion layer. `music-lab.html` plays the songs on their own.
 - **Villager orders** (`src/core/orders.js`): one small daytime goal at a time (tap a
   building type N times, reach a streak, land N perfect taps, earn X bronze, build Y). Each
   pays bonus bronze, and the next arrives shortly after.
@@ -31,10 +57,19 @@ git history (commit `f627912`).
     **spreads** to a touching building, and again every 6s.
   - Dawn shows a report, then the next day starts. Raiders grow in number and pip count
     with the days.
-- **UI:** collapsible build drawer (left by default, switchable to the right) with category
-  tabs and an **EDIT** toggle. In edit mode, tapping a building picks it up to move, rotate
-  or sell (sell asks twice). Outside edit mode, taps only collect, fire or put out fires.
-  All info and buttons live in one **dock** in the bottom corner opposite the drawer, which
+- **UI:** a menu rail (left by default, switchable to the right in settings) with **Build**
+  (a drawer with category tabs plus LAND), **Edit**, the **fish book** and **settings**
+  (menu side, grid, reset view, skip phase, new island).
+- **Editing:** hold a building to enter edit mode, then drag & drop it. An invalid drop
+  snaps back. The building stays selected, and the dock offers rotate (in place, nudging
+  one tile if needed), upgrade, sell (asks twice) and done. Tap empty space to leave edit
+  mode. On desktop, right-click a building to pick it up and left-click to drop it.
+  Outside edit mode, taps only collect, fish, fire or put out fires.
+- **Camera:** drag to pan, pinch or mouse wheel to zoom between 1× and 3×. The zoom glides
+  smoothly and then settles on a whole number, so pixels stay crisp. The world is a
+  640×400 sea around the island. Raiders start far out, and any that are off-screen get
+  blinking markers on the screen edge.
+- All info and buttons live in one **dock** in the bottom corner opposite the menu, which
   hops to the other corner if it would cover what you're touching. A phase clock and bar
   sit in the top bar, and the order card sits in the top corner.
 - Autosaves to localStorage. Time only runs while the tab is visible.
@@ -48,15 +83,16 @@ node --test tests/*.test.js   # core logic tests (Node 18+, no dependencies)
 
 Opening `index.html` straight from disk also works.
 
-Mouse & keyboard: **1–8** pick a building · **R** or mouse wheel rotate · click to build ·
-**E** edit mode (click a building to pick it up; **X** sells the held one) · **Esc** /
-right-click cancel · **Tab** hide the drawer · **G** grid · **N** skip to the next phase
-(testing).
+Mouse & keyboard: **1–8** pick a building · **R** rotate (the held or selected building) ·
+click to build · wheel zoom (rotates while holding a new building) · **+ / −** zoom · drag
+to pan · right-click a building to pick it up, left-click to drop · **E** edit mode
+(**X** sells the selected building) · **Esc** cancel / close · **Tab** build menu ·
+**B** fish book · **G** grid · **N** skip to the next phase (testing).
 
-Touch: tap a card, drag or tap to position, then ✓ (or tap the same tile again). EDIT, then
-tap a building to move, rotate or sell it. Tap full buildings to collect, or to fire at
-night. Tap fires to put them out. Tapping a building that isn't full shows its info in the
-dock.
+Touch: tap a card, drag or tap to position, then ✓ (or tap the same tile again). Hold a
+building to pick it up and drag it. Tap full buildings to collect, or to fire at night.
+Tap ripples to fish. Tap fires to put them out. Tapping a building that isn't full shows
+its info in the dock. Pinch to zoom, drag to pan.
 - Held sideways, phones go edge-to-edge: the page header hides behind a ≡ button, and
   safe areas and notches are respected. Held upright, a banner suggests turning sideways.
 - The game surface blocks scrolling, pinch-zoom, text selection and long-press callouts.
@@ -83,9 +119,12 @@ dock.
 
 ## Rendering setup
 
-- Fixed internal resolution **320×180**; Phaser `pixelArt: true`, `roundPixels: true`.
-- Only whole-number zoom. "Auto" picks the biggest whole multiple in *device* pixels, so
-  each game pixel is an exact N×N block even on fractional-DPR phones.
+- Fixed internal resolution **640×360**; Phaser `pixelArt: true`, `roundPixels: true`.
+  The canvas is only scaled by whole numbers. "Auto" picks the biggest whole multiple in
+  *device* pixels, so each game pixel is an exact N×N block even on fractional-DPR phones.
+- Two cameras: the world camera pans and zooms (1×–3×, settling on whole numbers), and a UI
+  camera draws every scroll-factor-0 object at 2× in a fixed 320×180 layout. Before each
+  render, every object is filtered to exactly one of the two.
 - All art is drawn in code, pixel by pixel, into canvas textures (`src/pixel.js`). There
   are no image assets, and textures are never deleted at runtime.
 
@@ -99,20 +138,25 @@ src/core/grid.js         placement rules + aura evaluation (pure, tested)
 src/core/economy.js      wallet, prices, fill/collect/combo, saves, number formatting (pure, tested)
 src/core/night.js        day/dusk/night/dawn clock, raiders, firing, landing, fires + drain, loot (pure, tested)
 src/core/orders.js       villager orders: draw, progress, reward, restore (pure, tested)
+src/core/merchant.js     merchant ship visits, offers, night tools (pure, tested)
+src/core/fishing.js      ripples, casting, coin sets, gauge, fish book bonus, selling (pure, tested)
 src/pixel.js             Painter (per-pixel drawing), pixel font, PixelText
 src/common-art.js        UI panels, cards, currency icons, bubbles, badges, lights
 src/styles/sunlit.js     palette, sprites, island map and starting layout
 src/styles/square-terrain.js  smooth pixel coastline + water animation
-src/scene.js             rendering, drawer, dock, edit mode, placement, raiders, orders card, dawn report
+src/scene.js             rendering, cameras, menu rail, dock, drag & drop editing, fishing, raiders, modals
 src/main.js              boot, integer zoom, page controls
-tests/*.test.js          node:test suites for the core (grid, economy, night, orders)
+src/audio/music.js       synth voices, reverb/echo, sequencer, tuned coin sounds
+src/audio/songs.js       the day theme and its three arrangements (note data)
+src/audio/soundtrack.js  connects music to the game: phases, settings, coin taps
+music-lab.html           standalone page to compare the arrangements
+tests/*.test.js          node:test suites for the core (grid, economy, night, orders, merchant, fishing)
 ```
 
 ## Next
 
-- Money sinks (see the design discussion): building upgrades, land expansion, night tools,
-  prestige.
-- Day events (fish shoals, merchant ship).
+- More fish, and fishing upgrades (rods, bait).
+- Full desktop polish (keyboard panning, drag from a card onto the map).
 - Prestige with diamonds.
 - Copy/paste save codes (`Economy.serialize` / `deserialize` already validate input).
 - Balance pass on all the placeholder numbers.
