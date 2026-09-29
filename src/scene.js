@@ -3,9 +3,12 @@
 // loop, orders, the merchant and fishing live in Core / Economy / Night / Orders /
 // Merchant / Fishing; this file only draws and routes input.
 //
-// Two cameras: the world camera pans (drag) and zooms smoothly (pinch / wheel),
-// then settles on a whole-number zoom so pixels stay crisp; the UI camera draws
-// every scrollFactor-0 object at 2x in a fixed 320x180 layout on top.
+// The canvas is the whole screen at device resolution (one game pixel = one
+// device pixel). Two cameras: the world camera pans (drag) and zooms smoothly
+// (pinch / wheel), then settles on a whole-number zoom so pixels stay crisp; the
+// UI camera draws every scrollFactor-0 object at a whole-number scale US, in a
+// layout of UW x UH UI pixels (at least 320x180, wider or taller to fit the
+// screen). Rotating the device or resizing the window rebuilds the UI to fit.
 //
 // Modes:
 //   PLAY  taps collect (PERFECT if right as it fills), reel in fish, fire at
@@ -30,8 +33,8 @@
   ];
   const SAVE_KEY = 'itc-save-v1';
   const TOP = 14, RAIL = 20, DW = 26;          // top bar height, menu rail width, build drawer width
-  const UW = 320, UH = 180;                    // UI layout size (drawn at 2x)
-  const ZMIN = 1, ZMAX = 3, ZSTART = 2;        // world zoom range
+  // set by layout() from the screen size: UI layout size and scale, world zoom range
+  let UW = 320, UH = 180, US = 2, ZMIN = 1, ZMAX = 3, ZSTART = 2;
   const HOLD_MS = 450, DRAG_PX = 10;           // long-press time; movement (game px) that starts a drag
   const LETTER = { bronze: 'B', silver: 'S', gold: 'G', diamond: 'D' };
   const RARITY = { COMMON: '#c0cbdc', UNCOMMON: '#63c74d', RARE: '#2ce8f5', LEGENDARY: '#feae34' };
@@ -82,6 +85,7 @@
       this.buildNight();
       this.refreshEval();
       for (const b of this.state.buildings) this.addView(b);
+      this.buildShip();
       this.buildUI();
       const ph = this.state.cycle.phase;
       this.setNight(ph === 'dusk' || ph === 'night', true);
@@ -137,13 +141,27 @@
     }
 
     // ------------------------------------------------------------ cameras
+    // UI scale: the biggest whole number that still leaves a 320x180 layout.
+    // World zoom: US shows about as much as the UI covers; zooming out stops once
+    // the whole sea fits; zooming in goes to 1.5x that.
+    layout() {
+      const W = this.scale.width, H = this.scale.height, wb = this.S.world;
+      US = Math.max(1, Math.floor(Math.min(W / 320, H / 180)));
+      UW = Math.floor(W / US); UH = Math.floor(H / US);
+      ZSTART = US;
+      ZMAX = Math.max(ZSTART + 1, Math.round(US * 1.5));
+      ZMIN = Math.min(ZSTART, Math.max(1, Math.ceil(Math.max(W / wb.w, H / wb.h))));
+    }
     setupCameras() {
       const cam = this.cameras.main, wb = this.S.world;
+      this.layout();
       cam.setBackgroundColor('#124e89');
       cam.setBounds(wb.x0, wb.y0, wb.w, wb.h);
       cam.setZoom(ZSTART);
       cam.centerOn(160, 90);
-      this.uiCam = this.cameras.add(0, 0, this.scale.width, this.scale.height).setOrigin(0, 0).setZoom(this.scale.width / UW);
+      this.uiCam = this.cameras.add(0, 0, this.scale.width, this.scale.height).setOrigin(0, 0).setZoom(US);
+      this.scale.on('resize', this.onResize, this);
+      this.events.once('shutdown', () => this.scale.off('resize', this.onResize, this));
       // each object is drawn by exactly one camera: UI (scrollFactor 0) or world
       const split = () => {
         const wm = cam.id, um = this.uiCam.id;
@@ -153,7 +171,7 @@
       this.events.once('shutdown', () => this.events.off('prerender', split));
     }
     // pointer (game pixels) -> UI layout / world coordinates
-    uiPt(p) { return { x: p.x * UW / this.scale.width, y: p.y * UH / this.scale.height }; }
+    uiPt(p) { return { x: p.x / US, y: p.y / US }; }
     worldPt(sx, sy) {
       const cam = this.cameras.main, z = cam.zoom, hw = cam.width / 2, hh = cam.height / 2;
       return { x: cam.scrollX + hw - hw / z + sx / z, y: cam.scrollY + hh - hh / z + sy / z };
@@ -162,8 +180,27 @@
     toUI(wx, wy) {
       const cam = this.cameras.main, z = cam.zoom, hw = cam.width / 2, hh = cam.height / 2;
       const sx = (wx - (cam.scrollX + hw - hw / z)) * z, sy = (wy - (cam.scrollY + hh - hh / z)) * z;
-      return { x: sx * UW / this.scale.width, y: sy * UH / this.scale.height };
+      return { x: sx / US, y: sy / US };
     }
+    // the screen changed size (rotation, window resize, browser bars): keep the view
+    // centred on the same spot at the same relative zoom, and rebuild the UI if its layout changed
+    onResize() {
+      const cam = this.cameras.main, W = this.scale.width, H = this.scale.height;
+      // the centre remembered from the last frame (the camera may already have been resized)
+      const c = this.viewCenter || { x: 160, y: 90 }, rel = cam.zoom / US, before = [UW, UH, US].join();
+      if (this.zoomTween) { this.zoomTween.stop(); this.zoomTween = null; }
+      this.layout();
+      cam.setSize(W, H); this.uiCam.setSize(W, H).setZoom(US);
+      cam.setZoom(clamp(Math.round(rel * US), ZMIN, ZMAX)).centerOn(c.x, c.y);
+      if ([UW, UH, US].join() !== before) this.rebuildUI();
+    }
+    rebuildUI() {
+      this.closeModal(); this.hideReport(); this.hideCatch();
+      for (const o of [...this.children.list]) if (isUI(o)) o.destroy();
+      this.bannerObj = null;
+      this.buildUI();
+    }
+
     // zoom to z, keeping world point (wx, wy) under screen point (sx, sy)
     setView(z, sx, sy, wx, wy) {
       const cam = this.cameras.main, hw = cam.width / 2, hh = cam.height / 2;
@@ -211,8 +248,6 @@
     // ------------------------------------------------------------ extra UI art
     uiTextures() {
       const P = this.S.P, k = this.key, C = P.card, tex = PX.tex;
-      tex(this, k('drawer'), DW, UH - TOP, (p) => ART.drawPanel(p, 0, 0, DW, UH - TOP, P.panel));
-      tex(this, k('rail'), RAIL, UH - TOP, (p) => ART.drawPanel(p, 0, 0, RAIL, UH - TOP, P.panel));
       const box = (name, w, h, sel) => tex(this, k(name), w, h, (p) => {
         p.rect(1, 1, w - 2, h - 2, C.fill);
         const b = sel ? C.sel : C.border;
@@ -941,7 +976,9 @@
     tapBuilding(v, touch) {
       const b = v.b;
       if (b.burn > 0) return this.douse(v);
-      if (this.state.fishing.cast) return this.fishTap(v);
+      const cast = this.state.fishing.cast;          // while waiting for a bite you can keep playing
+      if (cast && cast.phase === 'reel') return this.fishTap(v);
+      if (cast && cast.phase === 'rest') return this.floatText(v.x, v.sprite.y - v.sprite.height, 'GET READY...', '#2ce8f5');
       const shot = N.fire(this.state, b.id, this.cov);
       if (shot) return this.shoot(v, shot);
       if (B[b.type].kind === 'defense' && b.cool > 0) return this.floatText(v.x, v.sprite.y - v.sprite.height, 'RELOADING', '#8b9bb4');
@@ -1032,7 +1069,7 @@
       this.splash(at.x, at.y);
       this.fishPanel.fishId = null;
       this.reel = 0;
-      this.banner('TAP BUILDINGS THAT MAKE THESE COINS', '#2ce8f5');
+      this.banner('LINE IS OUT... WAIT FOR A BITE', '#2ce8f5');
     }
     splash(x, y) {
       for (let i = 0; i < 8; i++) {
@@ -1059,24 +1096,24 @@
       if (this.music) this.music.coin(cur, this.reel, !!res.caught || !!res.setDone);
       if (res.caught) this.reel = 0;
       if (res.caught) return this.endCast(res.caught, res.first);
-      if (res.setDone) this.floatText(this.castAt.x, this.castAt.y - 10, 'SET!', '#fee761');
+      if (res.setDone) { this.floatText(this.castAt.x, this.castAt.y - 10, 'SET!', '#fee761'); this.fishPanel.pop = 8; }
     }
     endCast(caught, first) {
       const at = this.castAt;
       if (this.bobber) { this.tweens.killTweensOf(this.bobber); this.bobber.destroy(); this.bobber = null; }
       this.castAt = null;
       if (!caught) { this.banner('IT GOT AWAY...', '#8b9bb4'); return; }
-      const fish = F.FISH[caught];
       const img = this.add.image(at.x, at.y, this.key('fish-' + caught)).setDepth(2600);
       this.tweens.add({ targets: img, y: at.y - 24, duration: 500, ease: 'Quad.easeOut' });
       this.tweens.add({ targets: img, alpha: 0, delay: 900, duration: 300, onComplete: () => img.destroy() });
       this.burst(at.x, at.y - 6, ['#fee761', '#ffffff']);
-      this.floatText(at.x, at.y - 28, fish.rarity + '!', RARITY[fish.rarity]);
-      this.banner(first ? 'NEW FISH: ' + fish.name + '! +' + Math.round(F.BOOK_BONUS * 100) + '% INCOME' : 'CAUGHT A ' + fish.name + '!', first ? '#fee761' : '#63c74d');
+      this.showCatch(caught, first);                  // the reveal: only now do you learn what it was
       this.save();
     }
     onFishing(ev) {
-      if (ev.type === 'spot') this.banner('FISH BITING! TAP THE RIPPLE', '#2ce8f5');
+      if (ev.type === 'spot') this.banner('RIPPLES! TAP THEM TO FISH', '#2ce8f5');
+      else if (ev.type === 'bite') this.onBite();
+      else if (ev.type === 'nextSet' && this.castAt) { this.splash(this.castAt.x, this.castAt.y); this.fishPanel.pop = 8; }
       else if (ev.type === 'reset' && this.castAt && !(this.reel = 0)) this.floatText(this.castAt.x, this.castAt.y - 10, 'TOO SLOW', '#e43b44');
       else if (ev.type === 'escaped') this.endCast(null);
     }
@@ -1089,12 +1126,15 @@
       fp.name = U(new PixelText(this, x + 22, y + 2, '', { color: P.text, outline: P.textOutline }).setOrigin(0).setDepth(3002));
       fp.rar = U(new PixelText(this, x + 22, y + 9, '', { color: P.dim, outline: P.textOutline }).setOrigin(0).setDepth(3002));
       fp.sets = U(new PixelText(this, x + 52, y + 19, '', { color: P.dim, outline: P.textOutline }).setOrigin(0).setDepth(3002));
+      fp.msg = U(new PixelText(this, x + 3, y + 19, '', { color: '#2ce8f5', outline: P.textOutline }).setOrigin(0).setDepth(3002));
       fp.icons = [0, 1, 2, 3].map((i) => U(this.add.image(x + 3 + i * 11, y + 17, this.key('ico-bronze')).setOrigin(0).setDepth(3002)));
       fp.quit = U(this.add.image(x + w - 8, y + 7, this.key('ico-no')).setDepth(3002));
       fp.quitZone = U(this.add.zone(x + w - 16, y, 16, 15).setOrigin(0).setDepth(3003).setInteractive({ cursor: 'pointer' }));
       fp.quitZone.on('pointerdown', () => { if (F.giveUp(this.state)) this.endCast(null); });
-      fp.objs = [fp.bg, fp.g, fp.fish, fp.name, fp.rar, fp.sets, ...fp.icons, fp.quit, fp.quitZone];
+      fp.objs = [fp.bg, fp.g, fp.fish, fp.name, fp.rar, fp.sets, fp.msg, ...fp.icons, fp.quit, fp.quitZone];
     }
+    // the panel shows the hooked fish as a mystery: '???' and a dark silhouette.
+    // wait: line out, no coins yet. reel: the coin set + gauge. rest: a breather between sets.
     refreshFishPanel(time) {
       const fp = this.fishPanel, c = this.state.fishing.cast, show = !!c;
       if (fp.shown !== show) {
@@ -1104,31 +1144,83 @@
         if (show) fp.quitZone.setInteractive({ cursor: 'pointer' }); else fp.quitZone.disableInteractive();
       }
       if (!show) return;
-      const fish = F.FISH[c.fish], dx = fp.shake > 0 ? ((fp.shake-- & 2) ? 1 : -1) : 0, x = fp.x + dx, y = fp.y;
-      if (fp.fishId !== c.fish) {
-        fp.fishId = c.fish;
-        fp.fish.setTexture(this.key('fish-' + c.fish));
-        fp.name.setText(fish.name);
-        fp.rar.opt.color = RARITY[fish.rarity]; fp.rar.str = null; fp.rar.setText(fish.rarity);
-      }
-      fp.bg.setX(x); fp.fish.setX(x + 3); fp.name.setX(x + 22); fp.rar.setX(x + 22); fp.sets.setX(x + 52);
-      const blink = Math.floor(time / 200) & 1;
+      const P = this.S.P, dots = '.'.repeat(1 + (Math.floor(time / 400) % 3));
+      const dx = fp.shake > 0 ? ((fp.shake-- & 2) ? 1 : -1) : 0, dy = fp.pop > 0 ? -(fp.pop-- > 4 ? 1 : 0) : 0;
+      const x = fp.x + dx, y = fp.y + dy;
+      if (fp.fishId !== c.fish) { fp.fishId = c.fish; fp.fish.setTexture(this.key('fish-' + c.fish)).setTintFill(0x3a4466); }
+      const wait = c.phase === 'wait', rest = c.phase === 'rest';
+      fp.name.setText(wait ? 'LINE OUT' + dots : '???');
+      fp.rar.setText(wait ? 'WAIT FOR A BITE' : rest ? 'NICE! GET READY' : 'REEL IT IN!');
+      fp.fish.setAlpha(wait ? 0.35 : 1);
+      fp.bg.setPosition(x, y); fp.fish.setPosition(x + 3, y + 3 + (wait ? Math.floor(time / 300) % 2 : 0));
+      fp.name.setPosition(x + 22, y + 2); fp.rar.setPosition(x + 22, y + 9); fp.sets.setPosition(x + 52, y + 19); fp.msg.setPosition(x + 3, y + 19);
+      fp.quit.setPosition(x + fp.w - 8, y + 7);
+      const blink = Math.floor(time / 200) & 1, coins = c.phase === 'reel';
       fp.icons.forEach((im, i) => {
-        const on = i < c.set.length;
-        im.setVisible(on).setX(x + 3 + i * 11);
+        const on = coins && i < c.set.length;
+        im.setVisible(on).setPosition(x + 3 + i * 11, y + 17);
         if (!on) return;
         im.setTexture(this.key('ico-' + c.set[i]));
         im.setAlpha(i < c.pos ? 0.3 : i === c.pos ? (blink ? 1 : 0.6) : 1);
       });
-      fp.sets.setText(c.sets < 2 ? 'SETS ' + c.sets + '/2' : 'REEL IN!');
-      const g = fp.g.clear(), P = this.S.P;
+      fp.msg.setVisible(!coins).setText(wait ? 'SOMETHING IS NEAR' + dots : 'NEXT SET' + dots);
+      fp.sets.setVisible(coins).setText(c.sets < 2 ? 'SETS ' + c.sets + '/2' : 'REEL IN!');
+      const g = fp.g.clear();
       g.fillStyle(hex(P.panel.light), 1).fillRect(x, y, fp.w, 1).fillRect(x, y + fp.h - 1, fp.w, 1).fillRect(x, y, 1, fp.h).fillRect(x + fp.w - 1, y, 1, fp.h);
+      if (wait) return;
       // time left for the next tap in this set
-      if (c.pos > 0) g.fillStyle(0xfee761, 1).fillRect(x + 3, y + 28, Math.ceil(c.set.length * 11 * c.window / F.WINDOW), 1);
-      // the gauge: fill it to land the fish, it drains all the time
+      if (coins && c.pos > 0) g.fillStyle(0xfee761, 1).fillRect(x + 3, y + 28, Math.ceil(c.set.length * 11 * c.window / F.WINDOW), 1);
+      // the gauge: fill it to land the fish; it drains while reeling and holds between sets
       const gw = fp.w - 6;
       g.fillStyle(0x000000, 0.7).fillRect(x + 3, y + 30, gw, 4);
-      g.fillStyle(c.gauge < 0.25 ? 0xe43b44 : 0x63c74d, 1).fillRect(x + 3, y + 31, Math.max(0, Math.round((gw) * c.gauge)), 2);
+      g.fillStyle(c.gauge < 0.25 ? 0xe43b44 : rest ? 0x2ce8f5 : 0x63c74d, 1).fillRect(x + 3, y + 31, Math.max(0, Math.round(gw * c.gauge)), 2);
+    }
+    // the fish bites: the bobber is pulled under, then the coins appear
+    onBite() {
+      const at = this.castAt;
+      if (!at) return;
+      this.splash(at.x, at.y); this.splash(at.x, at.y + 2);
+      if (this.bobber) {
+        this.tweens.killTweensOf(this.bobber);
+        this.bobber.setY(at.y + 6);
+        this.tweens.add({ targets: this.bobber, y: at.y + 4, duration: 180, yoyo: true, repeat: -1, ease: 'Stepped', easeParams: [1] });
+      }
+      this.floatText(at.x, at.y - 8, '!', '#fee761');
+      this.cameras.main.shake(120, 0.002);
+      this.fishPanel.pop = 8;
+      this.banner('A BITE! TAP BUILDINGS WITH THESE COINS', '#fee761');
+      if (this.music) this.music.coin('gold', 6, true);
+      try { navigator.vibrate && navigator.vibrate(30); } catch (e) { /* not allowed */ }
+    }
+    // the reveal card after a catch: what it was, how rare, new to the book?
+    showCatch(id, first) {
+      this.hideCatch();
+      const P = this.S.P, fish = F.FISH[id], objs = [];
+      const w = 150, h = first ? 74 : 64, x = Math.round((UW - w) / 2), y = Math.round((UH - h) / 2) - 6;
+      const add = (o) => { U(o); objs.push(o); return o; };
+      const card = add(this.add.rectangle(x, y, w, h, 0x181425, 0.95).setOrigin(0).setDepth(3650).setInteractive());
+      card.on('pointerdown', () => this.hideCatch());
+      const g = add(this.add.graphics().setDepth(3651)), col = hex(RARITY[fish.rarity]);
+      g.fillStyle(col, 1).fillRect(x, y, w, 2).fillRect(x, y + h - 2, w, 2).fillRect(x, y, 2, h).fillRect(x + w - 2, y, 2, h);
+      g.fillStyle(col, 0.15).fillRect(x + 2, y + 2, w - 4, 38);
+      const text = (ty, s, c, sc) => add(this.add.image(UW / 2, ty, PX.textTex(this, s, { color: c, outline: P.textOutline, scale: sc || 1 })).setOrigin(0.5, 0).setDepth(3652));
+      text(y + 5, 'YOU CAUGHT', P.dim);
+      const img = add(this.add.image(UW / 2, y + 26, this.key('fish-' + id)).setDepth(3652).setScale(2));
+      text(y + 41, fish.name, RARITY[fish.rarity], 2);
+      const price = Object.entries(fish.price).map(([c, v]) => E.fmt(v) + LETTER[c]).join(' ');
+      text(y + 55, fish.rarity + '  -  SELLS FOR ' + price, RARITY[fish.rarity]);
+      if (first) text(y + 64, 'NEW IN YOUR BOOK! +' + Math.round(F.BOOK_BONUS * 100) + '% INCOME', '#fee761');
+      // pop in, bob, then go away by itself
+      for (const o of objs) o.setAlpha(0);
+      this.tweens.add({ targets: objs, alpha: 1, duration: 160 });
+      this.tweens.add({ targets: img, y: y + 24, duration: 400, yoyo: true, repeat: -1, ease: 'Stepped', easeParams: [2] });
+      this.catchObjs = objs;
+      this.catchTimer = this.time.delayedCall(first ? 4200 : 3200, () => this.hideCatch());
+    }
+    hideCatch() {
+      if (this.catchTimer) { this.catchTimer.remove(); this.catchTimer = null; }
+      for (const o of this.catchObjs || []) { this.tweens.killTweensOf(o); o.destroy(); }
+      this.catchObjs = null;
     }
     // ripples on the water where a fish is biting, the bobber while one is hooked
     drawRipple(time) {
@@ -1497,7 +1589,7 @@
     // ------------------------------------------------------------ menu rail + build drawer
     buildRail() {
       const k = this.key, x0 = this.railX();
-      U(this.add.image(x0, TOP, k('rail')).setOrigin(0).setDepth(3000).setInteractive());
+      U(this.add.image(x0, TOP, k('rail-' + UH)).setOrigin(0).setDepth(3000).setInteractive());
       const items = [
         { id: 'build', icon: 'ico-build', tip: ['BUILD', 'BUILDINGS AND LAND (TAB)'], fn: () => this.setDrawer(!this.drawerOpen) },
         { id: 'edit', icon: 'tool-move', tip: ['EDIT', 'MOVE, UPGRADE, SELL (E)', 'OR HOLD A BUILDING'], fn: () => this.setEdit(!this.edit) },
@@ -1530,7 +1622,7 @@
       this.drawer = { objs: [], cards: [] };
       const d = this.drawer, x0 = this.drawerX();
       const ui = (o) => { U(o); d.objs.push(o); return o; };
-      ui(this.add.image(x0, TOP, k('drawer')).setOrigin(0).setDepth(3000).setInteractive());
+      ui(this.add.image(x0, TOP, k('drawer-' + UH)).setOrigin(0).setDepth(3000).setInteractive());
       d.tabs = CATS.map((cat, i) => {
         const tx = x0 + 1 + (i % 2) * 12, ty = TOP + 2 + Math.floor(i / 2) * 12;
         const bg = ui(this.add.image(tx, ty, k('tab')).setOrigin(0).setDepth(3001).setInteractive({ cursor: 'pointer' }));
@@ -1634,7 +1726,7 @@
 
     // ------------------------------------------------------------ modals (fish book, settings)
     // modal = centred panel over a dimmed backdrop; tapping the backdrop closes it
-    openModal(kind, title, w, rows) {
+    openModal(kind, title, w, rows, tabs) {
       this.closeModal();
       if (this.ghost) this.cancel();
       this.clearFocus();
@@ -1657,6 +1749,15 @@
       };
       text(x + 5, y + 5, title[0], P.accent);
       if (title[1]) text(x + 5 + PX.measure(title[0]) + 6, y + 5, title[1], P.dim);
+      let tx = x + 5 + PX.measure(title[0]) + 10;
+      for (const t of tabs || []) {
+        const tw = PX.measure(t.label) + 10;
+        this.drawBtn(g, tx, y + 3, tw, t.on ? 'ok' : 'off');
+        text(tx + 5, y + 6, t.label, t.on ? P.text : P.dim);
+        const z = add(this.add.zone(tx - 1, y + 1, tw + 2, 16).setOrigin(0).setDepth(3704).setInteractive({ cursor: 'pointer' }));
+        z.on('pointerdown', t.fn);
+        tx += tw + 3;
+      }
       button(x + w - 4, y + 3, '', null, () => this.closeModal(), 'ico-no');
       rows.forEach((row, i) => {
         const ry = y + 22 + i * RH;
@@ -1705,46 +1806,63 @@
       this.openBook();
     }
 
-    openSettings(armed) {
-      if (this.modal && this.modal.kind === 'settings' && !armed) { this.closeModal(); return; }
-      const api = window.IslandGame, gridOn = this.registry.get('grid') !== false;
-      const mu = this.music, rows = [];
-      if (mu && mu.ok) rows.push(
-        { text: 'DAY MUSIC', sub: mu.track === 'off' ? 'SILENT (COIN SOUNDS STAY ON)' : IslandSongs.SONGS[mu.track].tag, btn: { label: mu.trackName(), tone: mu.track === 'off' ? 'off' : 'ok', fn: () => { mu.unlock(); mu.nextTrack(); this.openSettings(true); } } },
-        { text: 'VOLUME', sub: 'MUSIC AND COIN SOUNDS', btn: { label: mu.volName(), fn: () => { mu.nextVol(); this.openSettings(true); } } },
-        { text: 'COINS ON THE BEAT', sub: 'TAPS LAND ON THE MUSIC\'S BEAT', btn: { label: mu.snap ? 'ON' : 'OFF', tone: mu.snap ? 'ok' : 'off', fn: () => { mu.toggleSnap(); this.openSettings(true); } } },
-      );
-      rows.push(
-        { text: 'MENU SIDE', sub: 'WHICH EDGE THE MENU SITS ON', btn: { label: this.side === 'left' ? 'LEFT' : 'RIGHT', fn: () => { this.closeModal(); api.setSide(this.side === 'left' ? 'right' : 'left'); } } },
-        { text: 'TILE GRID', sub: 'DOTS ON BUILDABLE GRASS', btn: { label: gridOn ? 'ON' : 'OFF', tone: gridOn ? 'ok' : 'off', fn: () => { api.toggleGrid(); this.openSettings(true); } } },
-        { text: 'VIEW', sub: 'PINCH OR WHEEL TO ZOOM, DRAG TO PAN', btn: { label: 'RESET', fn: () => { this.resetView(); this.closeModal(); } } },
-        { text: 'SKIP PHASE', sub: 'FOR TESTING (N)', btn: { label: 'SKIP', fn: () => { this.closeModal(); this.skipPhase(); } } },
-        { text: 'NEW ISLAND', sub: armed === 'wipe' ? 'TAP AGAIN TO WIPE YOUR SAVE' : 'START OVER FROM SCRATCH', subColor: armed === 'wipe' ? '#e43b44' : null,
-          btn: { label: armed === 'wipe' ? 'SURE?' : 'WIPE', tone: 'danger', fn: () => { if (armed === 'wipe') api.newIsland(); else this.openSettings('wipe'); } } },
-      );
-      this.openModal('settings', ['SETTINGS'], 240, rows);
+    // two tabs: SOUND and GAME. `again` re-opens in place after a change (instead of toggling closed)
+    openSettings(again, tab, armed) {
+      if (this.modal && this.modal.kind === 'settings' && !again) { this.closeModal(); return; }
+      tab = tab || this.settingsTab || 'sound';
+      this.settingsTab = tab;
+      const api = window.IslandGame, gridOn = this.registry.get('grid') !== false, mu = this.music, rows = [];
+      const re = (t, a) => () => this.openSettings(true, t || tab, a);
+      if (tab === 'sound') {
+        if (mu && mu.ok) rows.push(
+          { text: 'DAY MUSIC', sub: mu.track === 'off' ? 'SILENT (COIN SOUNDS STAY ON)' : IslandSongs.SONGS[mu.track].tag, btn: { label: mu.trackName(), tone: mu.track === 'off' ? 'off' : 'ok', fn: () => { mu.unlock(); mu.nextTrack(); re()(); } } },
+          { text: 'VOLUME', sub: 'MUSIC AND COIN SOUNDS', btn: { label: mu.volName(), fn: () => { mu.nextVol(); re()(); } } },
+          { text: 'COINS ON THE BEAT', sub: 'TAPS LAND ON THE MUSIC\'S BEAT', btn: { label: mu.snap ? 'ON' : 'OFF', tone: mu.snap ? 'ok' : 'off', fn: () => { mu.toggleSnap(); re()(); } } },
+        );
+        else rows.push({ text: 'NO SOUND IN THIS BROWSER', color: this.S.P.dim });
+      } else {
+        rows.push(
+          { text: 'HOW TO PLAY', sub: 'ALL THE RULES', btn: { label: 'OPEN', fn: () => { this.closeModal(); api.showHelp(); } } },
+          { text: 'MENU SIDE', sub: 'WHICH EDGE THE MENU SITS ON', btn: { label: this.side === 'left' ? 'LEFT' : 'RIGHT', fn: () => { this.closeModal(); api.setSide(this.side === 'left' ? 'right' : 'left'); } } },
+          { text: 'TILE GRID', sub: 'DOTS ON BUILDABLE GRASS', btn: { label: gridOn ? 'ON' : 'OFF', tone: gridOn ? 'ok' : 'off', fn: () => { api.toggleGrid(); re()(); } } },
+          { text: 'VIEW', sub: 'PINCH OR WHEEL TO ZOOM, DRAG TO PAN', btn: { label: 'RESET', fn: () => { this.resetView(); this.closeModal(); } } },
+        );
+        if (api.canFullscreen) rows.push({ text: 'FULLSCREEN', sub: 'HIDE THE BROWSER BARS', btn: { label: api.isFullscreen ? 'EXIT' : 'GO', fn: () => { api.toggleFullscreen(); this.closeModal(); } } });
+        rows.push(
+          { text: 'SKIP PHASE', sub: 'FOR TESTING (N)', btn: { label: 'SKIP', fn: () => { this.closeModal(); this.skipPhase(); } } },
+          { text: 'NEW ISLAND', sub: armed ? 'TAP AGAIN TO WIPE YOUR SAVE' : 'START OVER FROM SCRATCH', subColor: armed ? '#e43b44' : null,
+            btn: { label: armed ? 'SURE?' : 'WIPE', tone: 'danger', fn: () => { if (armed) api.newIsland(); else re(tab, true)(); } } },
+        );
+      }
+      this.openModal('settings', ['SETTINGS'], 240, rows, [
+        { label: 'SOUND', on: tab === 'sound', fn: re('sound') },
+        { label: 'GAME', on: tab === 'game', fn: re('game') },
+      ]);
     }
 
     // ------------------------------------------------------------ top bar
     buildUI() {
       const S = this.S, P = S.P, k = this.key;
       const txt = (x, y, s, color) => U(new PixelText(this, x, y, s, { color: color || P.text, outline: P.textOutline }).setOrigin(0, 0).setDepth(3001));
-      U(this.add.image(0, 0, k('panel-top')).setOrigin(0).setDepth(3000).setInteractive());
+      // panels sized to the current layout
+      PX.tex(this, k('topbar-' + UW), UW, TOP, (p) => ART.drawPanel(p, 0, -2, UW, TOP + 2, P.panel));
+      PX.tex(this, k('drawer-' + UH), DW, UH - TOP, (p) => ART.drawPanel(p, 0, 0, DW, UH - TOP, P.panel));
+      PX.tex(this, k('rail-' + UH), RAIL, UH - TOP, (p) => ART.drawPanel(p, 0, 0, RAIL, UH - TOP, P.panel));
+      U(this.add.image(0, 0, k('topbar-' + UW)).setOrigin(0).setDepth(3000).setInteractive());
       this.curText = {};
       for (const [c, x] of [['bronze', 3], ['silver', 100], ['gold', 142], ['diamond', 184]]) {
         U(this.add.image(x, 2, k('ico-' + c)).setOrigin(0).setDepth(3001));
         this.curText[c] = txt(x + 11, 3, '0');
       }
       this.rateText = txt(60, 3, '', P.accent);
-      this.phaseIcon = U(this.add.image(224, 2, k('ico-sun')).setOrigin(0).setDepth(3001));
-      this.phaseText = txt(235, 3, '', P.accent);
+      this.phaseIcon = U(this.add.image(UW - 96, 2, k('ico-sun')).setOrigin(0).setDepth(3001));
+      this.phaseText = txt(UW - 85, 3, '', P.accent);
       this.phaseBar = U(this.add.graphics().setDepth(3002));
 
       this.comboText = U(new PixelText(this, UW / 2, TOP + 4, 'COMBO x2', { color: P.accent, outline: P.worldOutline, scale: 2 }).setOrigin(0.5, 0).setDepth(3001).setVisible(false));
       this.comboBar = U(this.add.graphics().setDepth(3001));
       this.edgeG = U(this.add.graphics().setDepth(2990));
       this.buildOrderCard();
-      this.buildShip();
       this.buildItemBar();
       this.buildFishPanel();
       this.buildDock();
@@ -1770,13 +1888,15 @@
       E.tick(this.state, sec, this.eval);
       for (const ev of N.step(this.state, sec, this.S.lanes.length)) this.onCycle(ev);
       for (const ev of F.step(this.state, sec)) this.onFishing(ev);
+      const cam = this.cameras.main;
+      this.viewCenter = { x: cam.midPoint.x, y: cam.midPoint.y };
       if (this.music) {
         const cy = this.state.cycle, f = cy.t / N.DAY_LEN;
         this.music.follow(cy.phase, f < 0.34 ? 'morning' : f < 0.72 ? 'midday' : 'afternoon');
       }
 
       const night = this.state.cycle.phase === 'night', cast = this.state.fishing.cast;
-      const want = cast ? cast.set[cast.pos] : null;
+      const want = cast && cast.phase === 'reel' ? cast.set[cast.pos] : null;
       const blink = Math.floor(time / 90) & 1;
       for (const v of this.views.values()) {
         if (!v.bubble) { if (v.aim) v.aim.setVisible(night && !!N.targetFor(this.state, v.b, this.cov)); continue; }

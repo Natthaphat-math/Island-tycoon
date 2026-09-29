@@ -1,26 +1,29 @@
-// main.js — boots Phaser at a fixed 640x360 internal resolution and scales the
-// canvas by whole numbers only (nearest-neighbour), plus the page controls.
-// Inside, the UI is drawn at 2x (a 320x180 layout) and the world camera zooms
-// smoothly, so zooming out can show far more sea than before.
+// main.js — boots Phaser to fill the whole screen at device resolution (one game
+// pixel = one device pixel, so pixel art stays crisp at any size), keeps it sized
+// to the screen, and wires the page's few controls.
+// The scene picks whole-number UI and world scales from the size it gets.
 (function () {
   'use strict';
-  const W = 640, H = 360;
-
   const store = {
     get(k, d) { try { const v = localStorage.getItem('itc-' + k); return v == null ? d : v; } catch (e) { return d; } },
     set(k, v) { try { localStorage.setItem('itc-' + k, v); } catch (e) { /* private mode */ } },
   };
-  const state = { zoom: store.get('zoom', 'auto'), grid: true, side: store.get('side', 'left') === 'right' ? 'right' : 'left' };
+  const state = { grid: store.get('grid', '1') !== '0', side: store.get('side', 'left') === 'right' ? 'right' : 'left' };
+  const host = document.getElementById('game');
+  const dpr = () => window.devicePixelRatio || 1;
+  const size = () => ({ w: Math.max(320, Math.round(host.clientWidth * dpr())), h: Math.max(180, Math.round(host.clientHeight * dpr())) });
 
+  const s0 = size();
   const game = new Phaser.Game({
     type: Phaser.AUTO,
     parent: 'game',
-    width: W, height: H,
+    width: s0.w, height: s0.h,
     pixelArt: true,        // nearest-neighbour sampling, no smoothing
     roundPixels: true,
     antialias: false,
-    backgroundColor: '#10141f',
-    scale: { mode: Phaser.Scale.NONE, zoom: 2 },
+    backgroundColor: '#124e89',
+    scale: { mode: Phaser.Scale.NONE, zoom: 1 / dpr() },
+    input: { activePointers: 2 },
     banner: false,
   });
   game.registry.set('drawerSide', state.side);
@@ -28,98 +31,67 @@
   game.scene.add('game', window.GameScene, true);
   const scene = () => game.scene.getScene('game');
 
+  // follow the screen: rotation, window resizes, browser bars coming and going
+  let pending = null;
   function fit() {
     if (!game.isBooted) return;
-    const st = document.getElementById('stage');
-    // Auto picks the largest whole multiple in *device* pixels, so every game
-    // pixel is an exact NxN block of screen pixels even on 2.625x phones.
-    const dpr = window.devicePixelRatio || 1;
-    const auto = Math.max(1, Math.floor(Math.min(st.clientWidth * dpr / W, st.clientHeight * dpr / H)));
-    const z = state.zoom === 'auto' ? auto / dpr : parseInt(state.zoom, 10);
+    const s = size(), z = 1 / dpr();
+    if (game.scale.width !== s.w || game.scale.height !== s.h) game.scale.resize(s.w, s.h);
     if (game.scale.zoom !== z) game.scale.setZoom(z);
-    document.querySelector('#zoomBtns [data-z="auto"]').textContent = `Auto (${auto}×)`;
   }
+  const fitSoon = () => { clearTimeout(pending); pending = setTimeout(fit, 80); };
 
+  const root = document.documentElement;
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
   const api = window.IslandGame = {
     skipPhase() { scene().skipPhase(); },
     newIsland() {
       try { localStorage.removeItem('itc-save-v1'); } catch (e) { /* ignore */ }
       game.registry.set('fresh', true);
       scene().scene.restart();
-      document.body.classList.remove('menu-open');
     },
     get side() { return state.side; },
     setSide(side) {
       state.side = side; store.set('side', side);
       game.registry.set('drawerSide', side);
-      document.getElementById('sideBtn').textContent = 'Menu: ' + side;
       const sc = scene(); sc.save(); sc.scene.restart();
     },
     toggleGrid() {
-      state.grid = !state.grid;
+      state.grid = !state.grid; store.set('grid', state.grid ? '1' : '0');
       game.registry.set('grid', state.grid);
-      scene().gridObj.setVisible(state.grid);
-      document.getElementById('gridBtn').setAttribute('aria-pressed', state.grid);
+      const sc = scene(); sc.gridObj.setVisible(state.grid || sc.edit);
     },
-    setZoom(z) {
-      state.zoom = z; store.set('zoom', z); fit();
-      document.querySelectorAll('#zoomBtns button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.z === z));
+    showHelp() { document.getElementById('info').hidden = false; },
+    // iPhone Safari has no fullscreen API (Add to Home Screen instead); iPad and desktops do
+    canFullscreen: !!(root.requestFullscreen || root.webkitRequestFullscreen),
+    get isFullscreen() { return !!fsEl(); },
+    async toggleFullscreen() {
+      try {
+        if (fsEl()) await (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+        else {
+          await (root.requestFullscreen || root.webkitRequestFullscreen).call(root);
+          if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+        }
+      } catch (e) { /* not allowed here */ }
+      fitSoon();
     },
     game,
     get state() { return scene().state; },
   };
 
-  const zb = document.getElementById('zoomBtns');
-  for (const z of ['auto', '1', '2', '3']) {
-    const b = document.createElement('button');
-    b.textContent = z === 'auto' ? 'Auto' : z + '×'; b.dataset.z = z;
-    b.setAttribute('aria-pressed', z === state.zoom);
-    b.onclick = () => { api.setZoom(z); b.blur(); };
-    zb.appendChild(b);
-  }
   // autosave: every few seconds and whenever the tab is hidden or closed
   const save = () => { const sc = scene(); if (sc && sc.state) sc.save(); };
   setInterval(save, 5000);
   document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
   window.addEventListener('pagehide', save);
 
-  // "New island" asks for a second tap instead of a confirm() dialog
-  const reset = document.getElementById('resetBtn');
-  let armed = null;
-  reset.onclick = () => {
-    if (!armed) {
-      reset.dataset.armed = ''; reset.textContent = 'Tap again to wipe';
-      armed = setTimeout(() => { delete reset.dataset.armed; reset.textContent = 'New island'; armed = null; }, 3000);
-      return;
-    }
-    clearTimeout(armed); armed = null; delete reset.dataset.armed; reset.textContent = 'New island';
-    api.newIsland();
-  };
-
+  // how-to-play overlay
+  const info = document.getElementById('info');
+  document.getElementById('helpClose').onclick = () => { info.hidden = true; };
   const full = document.getElementById('fullBtn');
-  const root = document.documentElement;
-  if (root.requestFullscreen || root.webkitRequestFullscreen) {
-    full.hidden = false;
-    full.onclick = async () => {
-      try {
-        if (document.fullscreenElement || document.webkitFullscreenElement) await (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-        else {
-          await (root.requestFullscreen || root.webkitRequestFullscreen).call(root);
-          if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
-        }
-      } catch (e) { /* not allowed here */ }
-      document.body.classList.remove('menu-open');
-    };
-  }
-  document.getElementById('menuBtn').onclick = () => document.body.classList.toggle('menu-open');
+  if (api.canFullscreen) { full.hidden = false; full.onclick = () => api.toggleFullscreen(); }
 
-  document.getElementById('skipBtn').onclick = (e) => { api.skipPhase(); e.target.blur(); };
-  const sideBtn = document.getElementById('sideBtn');
-  sideBtn.textContent = 'Menu: ' + state.side;
-  sideBtn.onclick = (e) => { api.setSide(state.side === 'left' ? 'right' : 'left'); e.target.blur(); document.body.classList.remove('menu-open'); };
-  document.getElementById('gridBtn').onclick = (e) => { api.toggleGrid(); e.target.blur(); };
-
-  // rules table in the sidebar, generated from the core data so it never drifts
+  // rules table in the help, generated from the core data so it never drifts
   const B = Core.BUILDINGS, name = (t) => B[t].name.toLowerCase();
   const rows = Core.RULES.map((ru) => {
     const targets = Object.keys(B).filter(ru.to).map(name).join(', ');
@@ -127,7 +99,10 @@
   }).join('');
   document.getElementById('rules').innerHTML = rows;
 
-  window.addEventListener('resize', fit);
-  new ResizeObserver(fit).observe(document.getElementById('stage'));
+  window.addEventListener('resize', fitSoon);
+  window.addEventListener('orientationchange', fitSoon);
+  document.addEventListener('fullscreenchange', fitSoon);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', fitSoon);
+  new ResizeObserver(fitSoon).observe(host);
   game.events.once('ready', fit);
 })();

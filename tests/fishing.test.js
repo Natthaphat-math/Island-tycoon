@@ -18,7 +18,7 @@ function island() {
 function hooked(s, fish, set) {
   s.fishing.spot = { c: 1, r: 2, until: 999 };
   F.cast(s);
-  Object.assign(s.fishing.cast, { fish, set, pos: 0, window: 0 });
+  Object.assign(s.fishing.cast, { fish, set, pos: 0, window: 0, phase: 'reel', timer: 0 });
   return s.fishing.cast;
 }
 const tapFor = (s, cur) => F.tap(s, cur === 'bronze' ? s.hut : s.work);
@@ -47,7 +47,27 @@ test('tapping the right currencies in order builds the gauge; sets roll over', (
   assert.ok(done.setDone);
   assert.equal(c.sets, 1);
   assert.ok(Math.abs(c.gauge - (F.START_GAUGE + 3 * F.TAP_GAIN + F.SET_GAIN)) < 1e-9);
-  assert.equal(c.set.length, 3);                // a fresh set
+  assert.equal(c.set.length, 3);                // a fresh set...
+  assert.equal(c.phase, 'rest');                // ...shown after a short pause
+  assert.equal(tapFor(s, 'bronze'), null);      // taps between sets do nothing
+  const g = c.gauge;
+  assert.deepEqual(F.step(s, F.SET_REST - 0.1), []);
+  assert.equal(c.gauge, g);                     // the gauge holds still meanwhile
+  assert.deepEqual(F.step(s, 0.2).map((e) => e.type), ['nextSet']);
+  assert.ok(tapFor(s, c.set[0] === 'bronze' ? 'bronze' : 'silver').ok);
+});
+
+test('after casting, the fish only bites after a wait; the gauge waits too', () => {
+  const s = island();
+  s.fishing.spot = { c: 1, r: 2, until: 999 };
+  const c = F.cast(s);
+  assert.equal(c.phase, 'wait');
+  assert.ok(c.timer >= F.BITE_WAIT[0] && c.timer <= F.BITE_WAIT[1]);
+  assert.equal(tapFor(s, 'bronze'), null);
+  assert.deepEqual(F.step(s, F.BITE_WAIT[0] - 0.5), []);
+  assert.equal(c.gauge, F.START_GAUGE);
+  assert.deepEqual(F.step(s, F.BITE_WAIT[1]).map((e) => e.type), ['bite']);
+  assert.equal(c.phase, 'reel');
 });
 
 test('a wrong tap, or waiting past the 2s window, restarts the set', () => {
@@ -71,7 +91,7 @@ test('an empty gauge loses the fish; a full one lands it after at least 2 sets',
   c.gauge = 0.95;
   tapFor(s, 'bronze'); tapFor(s, 'bronze');     // set 1 done, gauge would pass 1 -> held just under
   assert.ok(s.fishing.cast);
-  c.set = ['bronze', 'bronze'];
+  c.set = ['bronze', 'bronze']; c.phase = 'reel';
   tapFor(s, 'bronze');
   const res = tapFor(s, 'bronze');
   assert.equal(res.caught, 'sardine');

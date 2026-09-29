@@ -1,12 +1,13 @@
 // core/fishing.js — fishing (pure; no Phaser).
 //
-// During the day a ripple appears on the water near the shore. Tap it to cast.
-// A fishing gauge starts part-full and drains all the time; if it empties, the
-// fish gets away. The fish shows a SET of currencies (e.g. silver gold silver).
+// During the day a ripple appears on the water near the shore. Tap it to cast,
+// then wait: after a few seconds (BITE_WAIT) something bites. Which fish it is
+// stays a secret until it's landed. A fishing gauge starts part-full and drains
+// all the time while reeling; if it empties, the fish gets away. The fish shows a SET of currencies (e.g. silver gold silver).
 // Tap buildings that make those currencies, in order. After each correct tap you
 // have WINDOW seconds for the next one, or the set restarts from its first coin.
 // Every correct tap nudges the gauge up and finishing a set gives a big boost;
-// then the next set appears. Fill the gauge to land the fish (always 2+ sets).
+// after a short breather (SET_REST, the gauge holds still) the next set appears. Fill the gauge to land the fish (always 2+ sets).
 //
 // Fish can ask for currencies your island can't make yet; that's a reason to build.
 // Caught fish go to your hold (sell them) and the fish book (each species you have
@@ -24,6 +25,8 @@
   const BOOK_BONUS = 0.05;       // +5% income per species discovered
   const SPOT_LIFE = 10;          // a ripple lasts this long
   const SPOT_GAP = [10, 22];     // seconds between ripples
+  const BITE_WAIT = [2.5, 6];    // seconds between casting and the bite
+  const SET_REST = 1.5;          // pause after a finished set before the next one
 
   // A small starting cast of fish. set: pattern of currency slots drawn from `pool`.
   const FISH = {
@@ -76,14 +79,20 @@
     return set;
   }
 
-  // Advance: ripples come and go during the day; the gauge drains while casting.
-  // Returns events: { type: 'spot' } | { type: 'spotGone' } | { type: 'escaped', fish }.
+  // Advance: ripples come and go during the day; a cast waits for its bite, then the
+  // gauge drains while reeling (not during the pause between sets).
+  // Returns events: spot | spotGone | bite | nextSet | reset | escaped (with fish).
   function step(state, dt) {
     const f = ensure(state), cy = state.cycle, ev = [];
     const day = cy && cy.phase === 'day';
     if (f.cast) {
       if (!day) { ev.push({ type: 'escaped', fish: f.cast.fish }); f.cast = null; return ev; }
       const c = f.cast;
+      if (c.phase === 'wait' || c.phase === 'rest') {
+        c.timer -= dt;
+        if (c.timer <= 0) { ev.push({ type: c.phase === 'wait' ? 'bite' : 'nextSet' }); c.phase = 'reel'; c.timer = 0; }
+        return ev;
+      }
       c.gauge -= FISH[c.fish].drain * dt;
       if (c.pos > 0) { c.window -= dt; if (c.window <= 0) { c.pos = 0; c.window = 0; ev.push({ type: 'reset' }); } }
       if (c.gauge <= 0) { ev.push({ type: 'escaped', fish: c.fish }); f.cast = null; }
@@ -112,15 +121,17 @@
     const rand = rng(((state.cycle ? state.cycle.day : 1) * 389 + f.seed++) * 7);
     let roll = rand() * IDS.reduce((a, id) => a + FISH[id].weight, 0), fish = IDS[0];
     for (const id of IDS) { roll -= FISH[id].weight; if (roll < 0) { fish = id; break; } }
-    f.cast = { fish, set: makeSet(FISH[fish], rand), pos: 0, window: 0, gauge: START_GAUGE, sets: 0, seed: Math.floor(rand() * 1e9) };
+    const timer = BITE_WAIT[0] + rand() * (BITE_WAIT[1] - BITE_WAIT[0]);
+    f.cast = { fish, phase: 'wait', timer, set: makeSet(FISH[fish], rand), pos: 0, window: 0, gauge: START_GAUGE, sets: 0, seed: Math.floor(rand() * 1e9) };
     f.spot = null;
     return f.cast;
   }
 
-  // Tap a building while fishing. Returns { ok, reset?, setDone?, caught? } or null if not fishing.
+  // Tap a building while reeling. Returns { ok, reset?, setDone?, caught? }, or null
+  // if there's nothing to reel yet (no cast, still waiting for a bite, or between sets).
   function tap(state, b) {
     const f = ensure(state), c = f.cast;
-    if (!c) return null;
+    if (!c || (c.phase && c.phase !== 'reel')) return null;
     const def = B[b.type];
     if (!def.cur || b.burn > 0) return { ok: false };
     if (def.cur !== c.set[c.pos]) {                 // wrong currency: this set starts over
@@ -135,6 +146,7 @@
       c.gauge = Math.min(1, c.gauge + SET_GAIN);
       c.pos = 0; c.window = 0;
       c.set = makeSet(FISH[c.fish], rng(c.seed + c.sets * 101));
+      c.phase = 'rest'; c.timer = SET_REST;
     }
     // never land a fish on the first set
     if (c.gauge >= 1 && c.sets >= 2) {
@@ -175,7 +187,7 @@
     return state;
   }
 
-  const api = { WINDOW, START_GAUGE, TAP_GAIN, SET_GAIN, BOOK_BONUS, SPOT_LIFE, FISH, IDS, ensure, bookBonus, spotTiles, step, cast, tap, giveUp, sell, restore };
+  const api = { WINDOW, START_GAUGE, BITE_WAIT, SET_REST, TAP_GAIN, SET_GAIN, BOOK_BONUS, SPOT_LIFE, FISH, IDS, ensure, bookBonus, spotTiles, step, cast, tap, giveUp, sell, restore };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fishing = api;
 })(typeof window !== 'undefined' ? window : globalThis);

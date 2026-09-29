@@ -25,10 +25,12 @@ git history (commit `f627912`).
     (fired from the night toolbar at the closest raider), plus currency swaps: bronze →
     silver or silver → gold.
 - **Fishing** (`src/core/fishing.js`): by day a ripple appears on the water by the shore.
-  Tap it and a fish bites (sardine, snapper, tuna or pearlfish, weighted by rarity). It shows
+  Tap it to cast, then wait 2.5–6s for a bite (you can keep collecting meanwhile). Which
+  fish it is (sardine, snapper, tuna or pearlfish, weighted by rarity) stays a secret, shown
+  as "???" and a silhouette, until it's landed and revealed on a catch card. It shows
   a set of coins; tap buildings that make them, in order, each within 2s of the last or the
-  set restarts. A gauge drains all the time; correct taps and finished sets fill it, and a
-  full gauge lands the fish (never before 2 sets). Rarer fish want rarer coins, even ones
+  set restarts. A gauge drains all the time; correct taps and finished sets fill it (after each set
+  there's a 1.5s pause, and the gauge holds still), and a full gauge lands the fish (never before 2 sets). Rarer fish want rarer coins, even ones
   the island can't make yet. Caught fish go to the hold (sell them in the fish book) and the
   book itself: every species ever caught adds +5% to all income, for good.
 - **Music** (`src/audio/`): a small Web Audio synth and step sequencer. There are no audio
@@ -59,7 +61,8 @@ git history (commit `f627912`).
     with the days.
 - **UI:** a menu rail (left by default, switchable to the right in settings) with **Build**
   (a drawer with category tabs plus LAND), **Edit**, the **fish book** and **settings**
-  (menu side, grid, reset view, skip phase, new island).
+  in two tabs: Sound (day music, volume, coins on the beat) and Game (how to play, menu side,
+  grid, reset view, fullscreen, skip phase, new island).
 - **Editing:** hold a building to enter edit mode, then drag & drop it. An invalid drop
   snaps back. The building stays selected, and the dock offers rotate (in place, nudging
   one tile if needed), upgrade, sell (asks twice) and done. Tap empty space to leave edit
@@ -119,19 +122,24 @@ its info in the dock. Pinch to zoom, drag to pan.
 
 ## Rendering setup
 
-- Fixed internal resolution **640×360**; Phaser `pixelArt: true`, `roundPixels: true`.
-  The canvas is only scaled by whole numbers. "Auto" picks the biggest whole multiple in
-  *device* pixels, so each game pixel is an exact N×N block even on fractional-DPR phones.
-- Two cameras: the world camera pans and zooms (1×–3×, settling on whole numbers), and a UI
-  camera draws every scroll-factor-0 object at 2× in a fixed 320×180 layout. Before each
-  render, every object is filtered to exactly one of the two.
+- The game fills the whole screen (phone, tablet or window) at **device resolution**: one
+  game pixel is one device pixel, so every art pixel is an exact N×N block at any zoom.
+  Phaser `pixelArt: true`, `roundPixels: true`; rotation, window resizes and browser bars
+  resize the canvas live.
+- Two cameras. The UI camera draws every scroll-factor-0 object at the biggest whole-number
+  scale that still leaves a layout of at least 320×180 UI pixels (wider on phones, taller
+  on iPads), and the UI is rebuilt when that layout changes. The world camera pans and
+  zooms; zoom settles on whole numbers, from "whole sea visible" to 1.5× the UI scale.
+  Before each render, every object is filtered to exactly one of the two cameras.
+- The page is only the game; "How to play" (the rules) opens from Settings. On
+  iPhone/iPad, Share → Add to Home Screen runs it without the browser bars.
 - All art is drawn in code, pixel by pixel, into canvas textures (`src/pixel.js`). There
   are no image assets, and textures are never deleted at runtime.
 
 ## Files
 
 ```
-index.html               page shell, controls, help sidebar
+index.html               full-screen page shell, how-to-play overlay
 lib/phaser.min.js        Phaser 3.80.1 (vendored, so it works offline / on itch.io)
 lib/break_eternity.min.js  big-number library (MIT, vendored)
 src/core/grid.js         placement rules + aura evaluation (pure, tested)
@@ -145,7 +153,7 @@ src/common-art.js        UI panels, cards, currency icons, bubbles, badges, ligh
 src/styles/sunlit.js     palette, sprites, island map and starting layout
 src/styles/square-terrain.js  smooth pixel coastline + water animation
 src/scene.js             rendering, cameras, menu rail, dock, drag & drop editing, fishing, raiders, modals
-src/main.js              boot, integer zoom, page controls
+src/main.js              boot, full-screen sizing, page API (help, fullscreen, grid, side)
 src/audio/music.js       synth voices, reverb/echo, sequencer, tuned coin sounds
 src/audio/songs.js       the day theme and its three arrangements (note data)
 src/audio/soundtrack.js  connects music to the game: phases, settings, coin taps
